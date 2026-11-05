@@ -6,7 +6,8 @@ Cloudflare Tunnel 経由で公開し、Cloudflare Access とパスキーでロ�
 *A real-time status dashboard for a Raspberry Pi home server, served through Cloudflare Tunnel with Cloudflare Access and passkey login. The UI is in Japanese.*
 
 - 必要なもの: Linux（Raspberry Pi OS / Ubuntu など）、Python 3.10 以上と `python3-cryptography`、Cloudflare で管理しているドメイン、Tailscale
-- ドキュメント: [home-status-docs](https://github.com/yuna1107-k/home-status-docs)（セットアップ・設定項目・構成）
+- ドキュメント: [home-status-docs](https://github.com/yuna1107-k/home-status-docs)（セットアップ・設定項目・構成）。
+  `docs/` にサブモジュールとして入っているので、`git clone --recurse-submodules` で一緒に取得できます
 - 脆弱性の報告: [SECURITY.md](.github/SECURITY.md)
 
 ## ライセンス
