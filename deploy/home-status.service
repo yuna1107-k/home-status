@@ -10,7 +10,7 @@ Type=simple
 WorkingDirectory=%h/home-status
 EnvironmentFile=-%h/home-status/.env
 # public: LAN 閲覧用 / admin: Tailscale Serve (https:8443) 経由の操作用 / tunnel: Cloudflare Tunnel 用
-ExecStart=/usr/bin/python3 -u %h/home-status/server.py --public 0.0.0.0:8090 --admin 127.0.0.1:8092 --tunnel 127.0.0.1:8096
+ExecStart=/usr/bin/python3 -u %h/home-status/src/server.py --public 0.0.0.0:8090 --admin 127.0.0.1:8092 --tunnel 127.0.0.1:8096
 Restart=always
 RestartSec=3
 

@@ -28,7 +28,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-DATA_DIR = Path(__file__).resolve().parent / "data"
+# リポジトリのルート（.env と data/ を置く）
+ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = ROOT / "data"
 OUTBOX = Path(os.environ.get("CLOUD_OUTBOX", str(DATA_DIR / "outbox.jsonl")))
 API = "https://api.cloudflare.com/client/v4"
 HOST = socket.gethostname()
@@ -88,7 +90,7 @@ def _env(name: str) -> str:
     value = os.environ.get(name)
     if value is None:
         try:
-            for line in (Path(__file__).resolve().parent / ".env").read_text(encoding="utf-8").splitlines():
+            for line in (ROOT / ".env").read_text(encoding="utf-8").splitlines():
                 key, sep, val = line.strip().partition("=")
                 if sep and key.strip() == name and not line.lstrip().startswith("#"):
                     value = val.strip().strip('"').strip("'")

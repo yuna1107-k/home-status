@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """登録済みパスキーの確認・削除（端末をなくしたとき用）。
 
-  python3 tools/passkey_admin.py list          一覧
-  python3 tools/passkey_admin.py remove <ID>   1 つ削除（ID は先頭の数文字でも可）
-  python3 tools/passkey_admin.py reset         全部削除（次に開いたとき最初の登録からやり直し）
+  python3 src/tools/passkey_admin.py list          一覧
+  python3 src/tools/passkey_admin.py remove <ID>   1 つ削除（ID は先頭の数文字でも可）
+  python3 src/tools/passkey_admin.py reset         全部削除（次に開いたとき最初の登録からやり直し）
 
 削除後は `systemctl --user restart home-status` でログイン中のセッションも無効になる。
 """

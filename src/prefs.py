@@ -10,7 +10,7 @@ from pathlib import Path
 import cloud
 
 KV_KEY = "prefs"
-STORE = Path(os.environ.get("PREFS_STORE", str(Path(__file__).resolve().parent / "data/prefs.json")))
+STORE = Path(os.environ.get("PREFS_STORE", str(cloud.DATA_DIR / "prefs.json")))
 _lock = threading.Lock()
 
 # 受け付ける項目と値（これ以外は保存しない）

@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 os.environ["PASSKEY_STORE"] = str(Path(tempfile.mkdtemp()) / "passkeys.json")
 # テストの登録を本物の D1 に送らない
 os.environ["CLOUD_OUTBOX"] = str(Path(tempfile.mkdtemp()) / "outbox.jsonl")

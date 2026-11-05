@@ -25,15 +25,15 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+SRC = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SRC))
 
-from cloud import _env  # noqa: E402
+from cloud import ROOT, _env  # noqa: E402
 
 API = "https://api.cloudflare.com/client/v4"
 DB_NAME = "home-status"
 WORKER_NAME = "home-status-watchdog"
-WORKER_FILE = ROOT / "watchdog/worker.js"
+WORKER_FILE = SRC / "watchdog/worker.js"
 CRON = "*/5 * * * *"
 ENV_FILE = ROOT / ".env"
 

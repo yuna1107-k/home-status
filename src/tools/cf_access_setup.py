@@ -17,10 +17,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
+SRC = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SRC))
 
-from cloud import _env  # noqa: E402
+from cloud import ROOT, _env  # noqa: E402
 
 HOST = _env("PASSKEY_RP_ID")
 APP_NAME = "Home Status"

@@ -15,7 +15,7 @@ CACHE_SECONDS = 600
 NEXTCLOUD_APP = os.environ.get("NEXTCLOUD_APP_CONTAINER", "nextcloud-app-1")
 NEXTCLOUD_DB = os.environ.get("NEXTCLOUD_DB_CONTAINER", "nextcloud-db-1")
 NEXTCLOUD_REDIS = os.environ.get("NEXTCLOUD_REDIS_CONTAINER", "nextcloud-redis-1")
-STATUS_DIR = Path(__file__).resolve().parent
+STATUS_DIR = Path(__file__).resolve().parent.parent
 
 _lock = threading.Lock()
 _cache: tuple[float, dict] | None = None
