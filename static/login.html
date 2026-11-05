@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Home Status ログイン</title>
+<link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="icon" href="/favicon-192.png" type="image/png" sizes="192x192">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<style>
+  :root {
+    --text: #0b1220; --muted: rgba(11,18,32,.62);
+    --glass: rgba(255,255,255,.42); --rim: rgba(255,255,255,.75);
+    --accent: #0a64d6; --danger: #c4161c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --text: #f2f5fb; --muted: rgba(242,245,251,.66); --glass: rgba(22,28,44,.38); --rim: rgba(255,255,255,.28); --accent: #4ca2ff; --danger: #ff6b6b; }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; display: grid; place-items: center; padding: 16px; color: var(--text);
+    font: 15px/1.55 "Segoe UI Variable", "Segoe UI", -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif;
+    background: #0b1a3a; overflow: hidden;
+  }
+
+  .card {
+    position: relative; width: min(400px, 100%); padding: 30px 28px 24px; border-radius: 28px;
+    background: var(--glass);
+    -webkit-backdrop-filter: blur(28px) saturate(185%); backdrop-filter: blur(28px) saturate(185%);
+    box-shadow: inset 0 1px 0 var(--rim), inset 0 -1px 0 rgba(255,255,255,.12), inset 0 0 0 1px rgba(255,255,255,.18),
+                0 24px 60px rgba(0,0,0,.28);
+    text-align: center; overflow: hidden;
+  }
+  .card::before {
+    content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+    background: linear-gradient(140deg, rgba(255,255,255,.45), rgba(255,255,255,0) 38%, rgba(255,255,255,0) 70%, rgba(255,255,255,.18));
+    mix-blend-mode: soft-light;
+  }
+  .logo { width: 64px; height: 64px; margin: 0 auto 12px; border-radius: 50%; overflow: hidden;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,.4), 0 6px 18px rgba(0,0,0,.25); }
+  .logo img { width: 100%; height: 100%; display: block; }
+  h1 { font-size: 20px; margin: 0 0 4px; font-weight: 650; }
+  .email { color: var(--muted); font-size: 13px; margin: 0 0 20px; overflow-wrap: anywhere; }
+  .btn {
+    width: 100%; border: 0; border-radius: 14px; padding: 13px 16px; cursor: pointer;
+    font: inherit; font-weight: 650; color: #fff; background: var(--accent);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.45), 0 8px 20px rgba(10,100,214,.35);
+  }
+  .btn:disabled { opacity: .55; cursor: default; }
+  .btn.ghost { background: rgba(255,255,255,.18); color: var(--text); box-shadow: inset 0 1px 0 var(--rim); font-weight: 550; margin-top: 10px; }
+  label { display: block; text-align: left; font-size: 12px; color: var(--muted); margin: 0 0 14px; }
+  input {
+    width: 100%; margin-top: 4px; padding: 10px 12px; border-radius: 12px; border: 0; font: inherit; color: var(--text);
+    background: rgba(255,255,255,.28); box-shadow: inset 0 1px 2px rgba(0,0,0,.12), inset 0 0 0 1px rgba(255,255,255,.3);
+  }
+  .note { font-size: 12px; color: var(--muted); margin: 14px 0 0; }
+  .msg { font-size: 13px; min-height: 1.4em; margin: 12px 0 0; }
+  .msg.error { color: var(--danger); }
+  a { color: inherit; }
+  .wall-art { position: fixed; inset: 0; z-index: -1; background: var(--wall-bg, #0b1a3a) var(--wall-image, none) center / cover no-repeat; }
+</style>
+<script src="/wall.js"></script>
+</head>
+<body>
+<div class="wall-art" aria-hidden="true"></div>
+<script>HSWall.applySaved()</script>
+<main class="card">
+  <div class="logo"><img src="/favicon-192.png" alt=""></div>
+  <h1 id="title">Home Status</h1>
+  <p class="email" id="email">確認中…</p>
+
+  <div id="login" hidden>
+    <button class="btn" id="btn-login" type="button">パスキーでログイン</button>
+    <p class="note">Face ID・Touch ID・Windows Hello・PIN などで本人確認します。</p>
+  </div>
+
+  <div id="register" hidden>
+    <label>この端末の名前<input id="device-name" maxlength="40" autocomplete="off"></label>
+    <button class="btn" id="btn-register" type="button">パスキーを登録してログイン</button>
+    <p class="note">最初のパスキーを登録します。以降はこの端末の生体認証や PIN でログインできます。2 台目以降は、ログイン後の画面から追加します。</p>
+  </div>
+
+  <p class="msg" id="msg" role="status"></p>
+  <p class="note"><a href="/cdn-cgi/access/logout">Cloudflare からログアウト</a></p>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const b64 = {
+  toBuf: (s) => Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/") + "===".slice((s.length + 3) % 4)), (c) => c.charCodeAt(0)).buffer,
+  fromBuf: (b) => btoa(String.fromCharCode(...new Uint8Array(b))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, ""),
+};
+
+async function post(path, body = {}) {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Requested-With": "home-status" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  return data;
+}
+
+function say(text, error = false) {
+  $("msg").className = `msg${error ? " error" : ""}`;
+  $("msg").textContent = text;
+}
+
+function friendly(err) {
+  if (err.name === "NotAllowedError") return "キャンセルされたか、時間切れになりました。もう一度お試しください。";
+  if (err.name === "InvalidStateError") return "この端末のパスキーは登録済みです。";
+  if (err.name === "SecurityError") return "このページの URL ではパスキーを使えません。";
+  return err.message || String(err);
+}
+
+function guessName() {
+  const ua = navigator.userAgent;
+  if (/iPhone/.test(ua)) return "iPhone";
+  if (/iPad/.test(ua)) return "iPad";
+  if (/Android/.test(ua)) return "Android";
+  if (/Macintosh/.test(ua)) return "Mac";
+  if (/Windows/.test(ua)) return "Windows";
+  return "この端末";
+}
+
+async function login() {
+  $("btn-login").disabled = true;
+  say("本人確認しています…");
+  try {
+    const opts = await post("/api/passkey/login/options");
+    const cred = await navigator.credentials.get({
+      publicKey: {
+        challenge: b64.toBuf(opts.challenge),
+        rpId: opts.rpId,
+        timeout: opts.timeout,
+        userVerification: opts.userVerification,
+        allowCredentials: opts.allowCredentials.map((c) => ({ type: c.type, id: b64.toBuf(c.id) })),
+      },
+    });
+    await post("/api/passkey/login", {
+      id: cred.id,
+      response: {
+        clientDataJSON: b64.fromBuf(cred.response.clientDataJSON),
+        authenticatorData: b64.fromBuf(cred.response.authenticatorData),
+        signature: b64.fromBuf(cred.response.signature),
+      },
+    });
+    say("ログインしました");
+    location.replace("/");
+  } catch (err) {
+    say(friendly(err), true);
+    $("btn-login").disabled = false;
+  }
+}
+
+async function register() {
+  $("btn-register").disabled = true;
+  say("パスキーを作成しています…");
+  try {
+    const opts = await post("/api/passkey/register/options");
+    const cred = await navigator.credentials.create({
+      publicKey: {
+        challenge: b64.toBuf(opts.challenge),
+        rp: opts.rp,
+        user: { id: b64.toBuf(opts.user.id), name: opts.user.name, displayName: opts.user.displayName },
+        pubKeyCredParams: opts.pubKeyCredParams,
+        authenticatorSelection: opts.authenticatorSelection,
+        excludeCredentials: opts.excludeCredentials.map((c) => ({ type: c.type, id: b64.toBuf(c.id) })),
+        attestation: opts.attestation,
+        timeout: opts.timeout,
+      },
+    });
+    await post("/api/passkey/register", {
+      id: cred.id,
+      name: $("device-name").value,
+      response: {
+        clientDataJSON: b64.fromBuf(cred.response.clientDataJSON),
+        attestationObject: b64.fromBuf(cred.response.attestationObject),
+      },
+    });
+    say("登録しました。続けてログインします…");
+    $("register").hidden = true;
+    $("login").hidden = false;
+    await login();
+  } catch (err) {
+    say(friendly(err), true);
+    $("btn-register").disabled = false;
+  }
+}
+
+async function init() {
+  if (!window.PublicKeyCredential) {
+    say("このブラウザはパスキーに対応していません。", true);
+    return;
+  }
+  try {
+    const res = await fetch("/api/passkey/state", { cache: "no-store" });
+    const state = await res.json();
+    if (!res.ok) throw new Error(state.error || `HTTP ${res.status}`);
+    if (state.logged_in) { location.replace("/"); return; }
+    $("email").textContent = state.email;
+    $("device-name").value = guessName();
+    $(state.registered ? "login" : "register").hidden = false;
+    $("title").textContent = state.registered ? "Home Status" : "パスキーの登録";
+  } catch (err) {
+    say(`状態を確認できません: ${err.message}`, true);
+  }
+}
+
+$("btn-login").addEventListener("click", login);
+$("btn-register").addEventListener("click", register);
+init();
+</script>
+</body>
+</html>

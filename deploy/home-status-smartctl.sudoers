@@ -1,0 +1,7 @@
+# home-status がディスクの SMART（自己診断）を読むための許可。読み取り（-a）だけを許す。
+# YOUR_USER をサービスを動かすユーザー名に、/dev/sda を .env の SMART_DISKS に合わせて書き換える。
+# 入れ方:
+#   sudo apt install smartmontools
+#   sudo install -m 440 deploy/home-status-smartctl.sudoers /etc/sudoers.d/home-status-smartctl
+#   sudo visudo -c
+YOUR_USER ALL=(root) NOPASSWD: /usr/sbin/smartctl -j -a -d sat /dev/sda

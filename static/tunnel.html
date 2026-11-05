@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>Tailscale Switch</title>
+<link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
+<link rel="icon" href="/favicon-192.png" type="image/png" sizes="192x192">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<style>
+  :root {
+    --text: #0b1220; --muted: rgba(11,18,32,.62); --glass: rgba(255,255,255,.42); --rim: rgba(255,255,255,.75);
+    --seg: rgba(255,255,255,.28); --seg-on: rgba(255,255,255,.92); --green: #0f9d58; --red: #d0021b; --accent: #0a64d6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --text: #f2f5fb; --muted: rgba(242,245,251,.66); --glass: rgba(22,28,44,.38); --rim: rgba(255,255,255,.28);
+      --seg: rgba(255,255,255,.08); --seg-on: rgba(255,255,255,.22); --green: #4ade80; --red: #ff6b6b; --accent: #4ca2ff; }
+  }
+  * { box-sizing: border-box; }
+  html, body { min-height: 100%; }
+  body {
+    margin: 0; min-height: 100vh; min-height: 100dvh; display: grid; place-items: center;
+    padding: max(16px, env(safe-area-inset-top)) 16px max(16px, env(safe-area-inset-bottom)); color: var(--text);
+    font: 15px/1.55 "Segoe UI Variable", "Segoe UI", -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", system-ui, sans-serif;
+    background: #0b1a3a;
+  }
+  .window {
+    position: relative; width: min(440px, 100%); border-radius: 28px; overflow: hidden; background: var(--glass);
+    -webkit-backdrop-filter: blur(28px) saturate(185%); backdrop-filter: blur(28px) saturate(185%);
+    box-shadow: inset 0 1px 0 var(--rim), inset 0 0 0 1px rgba(255,255,255,.18), 0 24px 60px rgba(0,0,0,.28);
+  }
+  .window::before { content: ""; position: absolute; inset: 0; pointer-events: none; border-radius: inherit;
+    background: linear-gradient(140deg, rgba(255,255,255,.4), rgba(255,255,255,0) 38%, rgba(255,255,255,0) 70%, rgba(255,255,255,.15)); mix-blend-mode: soft-light; }
+  .bar { display: flex; align-items: center; gap: 10px; padding: 14px 20px 0; }
+  .bar span { display: none; }
+  .bar h1 { font-size: 13px; font-weight: 600; margin: 0; color: var(--muted); letter-spacing: .02em; }
+  .body { padding: 18px 22px 22px; display: grid; gap: 18px; }
+  .state { display: flex; align-items: center; gap: 14px; }
+  .state i { width: 52px; height: 52px; border-radius: 50%; flex: none; background: radial-gradient(circle at 30% 25%, #c3c8d4, #6b7280); box-shadow: inset 0 1px 0 rgba(255,255,255,.5), 0 6px 16px rgba(0,0,0,.2); }
+  .state.on i { background: radial-gradient(circle at 30% 25%, #7cc4ff, #0a64d6); }
+  .state.lost i { background: radial-gradient(circle at 30% 25%, #ffd27a, #e8710a); }
+  .state.off i { background: radial-gradient(circle at 30% 25%, #ff9b9b, #d0021b); }
+  .state strong { font-size: 22px; display: block; }
+  .state small { color: var(--muted); }
+  .seg { display: flex; background: var(--seg); border-radius: 16px; padding: 4px; gap: 4px; box-shadow: inset 0 0 0 1px rgba(255,255,255,.15); }
+  .seg button { flex: 1; border: 0; border-radius: 12px; padding: 14px; font: inherit; font-weight: 700; background: transparent; color: var(--muted); cursor: pointer; }
+  .seg button.active { background: var(--seg-on); box-shadow: inset 0 1px 0 var(--rim), 0 4px 12px rgba(0,0,0,.15); }
+  .seg button.active.on { color: var(--green); }
+  .seg button.active.off { color: var(--red); }
+  .seg button:disabled { cursor: default; }
+  .note { color: var(--muted); font-size: 12.5px; margin: 0; }
+  .msg { font-size: 13px; margin: 0; min-height: 1.5em; }
+  .msg.error { color: var(--red); }
+  .who { font-size: 12px; color: var(--muted); border-top: 1px solid rgba(127,127,127,.2); padding-top: 12px; margin: 0; }
+  .who + .who { border-top: 0; padding-top: 0; }
+  .wall-art { position: fixed; inset: 0; z-index: -1; background: var(--wall-bg, #0b1a3a) var(--wall-image, none) center / cover no-repeat; }
+</style>
+<script src="/wall.js"></script>
+</head>
+<body>
+<div class="wall-art" aria-hidden="true"></div>
+<script>HSWall.applySaved()</script>
+<div class="window">
+  <div class="bar"><span></span><span></span><span></span><h1>HOME STATUS · TAILSCALE</h1></div>
+  <div class="body">
+    <div class="state" id="state"><i></i><div><strong id="state-text">確認中…</strong><small id="state-sub"></small></div></div>
+    <div class="seg">
+      <button type="button" class="on" id="btn-on" disabled>オン</button>
+      <button type="button" class="off" id="btn-off" disabled>オフ</button>
+    </div>
+    <p class="msg" id="msg"></p>
+    <p class="note">Pi の Tailscale が切れているため、ステータスボードは使えません。つながると自動でボードに切り替わります。切れている間は Tailscale 経由のアクセス（Nextcloud など）も使えません。</p>
+    <p class="who" id="who"></p>
+    <p class="who"><a href="#" id="logout" style="color:inherit">ログアウト</a></p>
+  </div>
+</div>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let current = null;
+let busy = false;
+
+function show(data) {
+  const box = $("state");
+  if (!data.authorized) {
+    box.className = "state";
+    $("state-text").textContent = "操作できません";
+    $("state-sub").textContent = "";
+    $("msg").className = "msg error";
+    $("msg").textContent = data.who || data.error || "認証されていません";
+    $("btn-on").disabled = $("btn-off").disabled = true;
+    $("who").textContent = "";
+    return;
+  }
+  current = data.running;
+  // 起動しているのにネットワークにつながっていない状態
+  const lost = data.running && data.online === false;
+  box.className = `state ${lost ? "lost" : data.running ? "on" : "off"}`;
+  $("state-text").textContent = lost ? "接続が切れています" : data.running ? "接続中" : "停止中";
+  $("state-sub").textContent = lost ? "Tailscale は起動していますが、ネットワークにつながっていません"
+    : [data.host, data.running ? data.ip : data.backend].filter(Boolean).join(" · ");
+  $("btn-on").classList.toggle("active", data.running);
+  $("btn-off").classList.toggle("active", !data.running);
+  $("btn-on").disabled = busy || (data.running && !lost);
+  $("btn-on").textContent = lost ? "再接続" : "オン";
+  $("btn-off").disabled = busy || !data.running;
+  $("who").textContent = `ログイン中: ${data.who}`;
+}
+
+async function refresh() {
+  try {
+    const res = await fetch("/api/tailscale", { cache: "no-store" });
+    if (res.status === 401) { location.replace("/login"); return; }
+    const data = await res.json();
+    // Tailscale がつながったらステータスボードに切り替える
+    if (data.authorized && (data.connected ?? data.running)) { location.replace("/"); return; }
+    show(data);
+  } catch (err) {
+    $("msg").className = "msg error";
+    $("msg").textContent = `状態を取得できません (${err.message})`;
+  }
+}
+
+async function post(running) {
+  const res = await fetch("/api/tailscale", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Requested-With": "home-status" },
+    body: JSON.stringify({ running }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body.error || `HTTP ${res.status}`);
+  return body;
+}
+
+async function setRunning(running) {
+  // 起動中なのに切れているときの「オン」は、いったんオフにしてからオンにし直す
+  const reconnect = running && current === true;
+  const label = reconnect ? "再接続" : running ? "オン" : "オフ";
+  if (!confirm(reconnect ? "Tailscale を再接続しますか？" : `Tailscale を${label}にしますか？`)) return;
+  busy = true;
+  $("btn-on").disabled = $("btn-off").disabled = true;
+  $("msg").className = "msg";
+  $("msg").textContent = reconnect ? "再接続しています…" : `${label}にしています…`;
+  try {
+    if (reconnect) { await post(false); await new Promise((r) => setTimeout(r, 1500)); }
+    const body = await post(running);
+    $("msg").textContent = reconnect ? "再接続しました。つながるまで少し待ってください" : body.message;
+  } catch (err) {
+    $("msg").className = "msg error";
+    $("msg").textContent = err.message;
+  } finally {
+    busy = false;
+    setTimeout(refresh, 1500);
+  }
+}
+
+$("logout").addEventListener("click", async (e) => {
+  e.preventDefault();
+  await fetch("/api/passkey/logout", { method: "POST", headers: { "Content-Type": "application/json", "X-Requested-With": "home-status" }, body: "{}" });
+  location.replace("/login");
+});
+$("btn-on").addEventListener("click", () => setRunning(true));
+$("btn-off").addEventListener("click", () => setRunning(false));
+// アカウント共通の表示設定（テーマ・背景）を反映する
+fetch("/api/prefs", { cache: "no-store" }).then((r) => (r.ok ? r.json() : null)).then((d) => {
+  if (!d?.prefs || !Object.keys(d.prefs).length) return;
+  let local = {};
+  try { local = JSON.parse(localStorage.getItem("hs-prefs") || "{}"); } catch { /* なし */ }
+  try { localStorage.setItem("hs-prefs", JSON.stringify({ ...local, ...d.prefs })); } catch { /* 保存できなくてもよい */ }
+  HSWall.applySaved();
+}).catch(() => {});
+refresh();
+setInterval(() => { if (!busy) refresh(); }, 5000);
+</script>
+</body>
+</html>

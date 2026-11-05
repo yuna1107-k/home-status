@@ -1,0 +1,10 @@
+// ステータスページ（home-status を動かすユーザー）から Pi を再起動できるようにする。
+// 許可するのは再起動だけ（シャットダウンなどは含めない）。
+// YOUR_USER をサービスを動かすユーザー名に置き換えてから /etc/polkit-1/rules.d/ に置く。
+polkit.addRule(function (action, subject) {
+  if ((action.id == "org.freedesktop.login1.reboot" ||
+       action.id == "org.freedesktop.login1.reboot-multiple-sessions") &&
+      subject.user == "YOUR_USER") {
+    return polkit.Result.YES;
+  }
+});
