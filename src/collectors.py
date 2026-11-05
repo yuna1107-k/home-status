@@ -118,7 +118,7 @@ SERVICES = [
     ("cloudflared", "cloudflared", False, "Cloudflare Tunnel", False),
     ("ssh", "ssh", False, "OpenSSH サーバー", False),
 ]
-# 追加で表示する systemd のユニット（カンマ区切り。例: EXTRA_SERVICES=apache2,ollama）
+# 追加で表示する systemd のユニット（カンマ区切り。例: EXTRA_SERVICES=nginx,cups）
 SERVICES += [(u, u, False, u, False) for u in
              (x.strip() for x in os.environ.get("EXTRA_SERVICES", "").split(","))
              if re.fullmatch(r"[A-Za-z0-9@._-]+", u) and u not in {sv[0] for sv in SERVICES}]
@@ -360,6 +360,7 @@ def collect_network(snap: dict) -> dict:
         "items": items,
         "devices": devices,
         "iface": NET_IFACE,
+        "gateway": lat["gateway"],
         "internet_host": INTERNET_HOST,
         "net": snap["net"],
         "history": {

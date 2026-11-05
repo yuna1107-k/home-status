@@ -859,7 +859,7 @@ function noteFor(r) {
   const fresh = lanNoteTags(r);
   if (fresh) notes.push(fresh);
   if (r.random_mac) notes.push('<span class="tag">ランダム MAC</span>');
-  if (r.name === "web.setting") notes.push('<span class="tag">ルーター</span>');
+  if (r.ip && r.ip === sec("network").gateway) notes.push('<span class="tag">ルーター</span>');
   return notes.join(" ");
 }
 
