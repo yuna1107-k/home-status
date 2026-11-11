@@ -109,7 +109,11 @@ async function post(path, body = {}) {
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+  if (!res.ok) {
+    const err = new Error(data.error || `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
   return data;
 }
 
@@ -151,17 +155,9 @@ async function login() {
   $("btn-login").disabled = true;
   say("本人確認しています…");
   try {
-    // まず共通パスキーを試し、無ければ（キャンセルを含む）このサイトのパスキーに切り替える
+    // 共通パスキーで本人確認する（共通アカウントが無効な環境では、サーバーがこのサイトのパスキーで返す）
     const opts = await post("/api/passkey/login/options", { common: true });
-    let cred;
-    try {
-      cred = await getAssertion(opts);
-    } catch (err) {
-      if (!opts.common) throw err;
-      let local;
-      try { local = await post("/api/passkey/login/options", { common: false }); } catch { throw err; }
-      cred = await getAssertion(local);
-    }
+    const cred = await getAssertion(opts);
     const res = await post("/api/passkey/login", {
       id: cred.id,
       response: {
@@ -181,8 +177,12 @@ async function login() {
     say("ログインしました");
     location.replace("/");
   } catch (err) {
-    say(friendly(err), true);
     $("btn-login").disabled = false;
+    if (err.status === 401 || err.status === 403) {
+      say(err.message, true);
+      return;
+    }
+    say("ログインできませんでした。もう一度お試しください。", true);
   }
 }
 

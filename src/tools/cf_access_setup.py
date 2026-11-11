@@ -125,7 +125,7 @@ def main() -> int:
         "CF_ACCESS_AUD": app["aud"],
         "CF_ACCESS_ALLOWED_EMAILS": ",".join(ALLOWED_EMAILS),
     })
-    print(f".env に CF_ACCESS_TEAM_DOMAIN / CF_ACCESS_AUD / CF_ACCESS_ALLOWED_EMAILS を書き込みました")
+    print(".env に CF_ACCESS_TEAM_DOMAIN / CF_ACCESS_AUD / CF_ACCESS_ALLOWED_EMAILS を書き込みました")
     return 0
 
 

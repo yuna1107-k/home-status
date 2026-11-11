@@ -15,6 +15,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
+import secrets
 import threading
 import time
 import urllib.parse
@@ -143,6 +145,7 @@ class BaseHandler(BaseHTTPRequestHandler):
     server_version = "HomeStatus/3.0"
     protocol_version = "HTTP/1.1"
     role = "base"
+    timeout = 15
 
     def _send(self, code: int, body: bytes, content_type: str, extra: dict | None = None) -> None:
         self.send_response(code)
@@ -154,7 +157,11 @@ class BaseHandler(BaseHTTPRequestHandler):
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Permissions-Policy", "publickey-credentials-get=(self), publickey-credentials-create=(self)")
         for key, value in (extra or {}).items():
-            self.send_header(key, value)
+            if isinstance(value, (list, tuple)):
+                for v in value:
+                    self.send_header(key, str(v))
+            else:
+                self.send_header(key, str(value))
         self.end_headers()
         if self.command != "HEAD":
             self.wfile.write(body)
@@ -175,6 +182,7 @@ class BaseHandler(BaseHTTPRequestHandler):
 class RedirectHandler(BaseHandler):
     """LAN・Tailscale の旧 URL は公開 URL に転送する。"""
 
+    timeout = 15
     role = "redirect"
 
     def do_GET(self) -> None:  # noqa: N802
@@ -187,6 +195,7 @@ class RedirectHandler(BaseHandler):
 class AppHandler(BaseHandler):
     """公開 URL の本体。Cloudflare Access の後ろで、さらにパスキーを求める。"""
 
+    timeout = 15
     role = "app"
 
     # ---- 認証
@@ -215,7 +224,13 @@ class AppHandler(BaseHandler):
         if not self.headers.get("Content-Type", "").startswith("application/json"):
             self._json(415, {"error": "JSON で送信してください"})
             return None
-        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            if length < 0:
+                raise ValueError("negative length")
+        except (ValueError, TypeError):
+            self._json(400, {"error": "Content-Length が不正です"})
+            return None
         if length > MAX_BODY:
             self._json(413, {"error": "リクエストが大きすぎます"})
             return None
@@ -273,6 +288,17 @@ class AppHandler(BaseHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
+        if path == "/.well-known/webauthn":
+            auth_origin = authdb.SSO_URL or (f"https://auth.{passkey.COMMON_RP_ID}" if passkey.COMMON_RP_ID else "https://auth.example.com")
+            origins = [auth_origin, PUBLIC_URL]
+            seen = set()
+            unique_origins = []
+            for o in origins:
+                if o and o not in seen:
+                    seen.add(o)
+                    unique_origins.append(o)
+            self._json(200, {"origins": unique_origins})
+            return
         if path in ASSETS:
             self._file(*ASSETS[path])
             return
@@ -291,9 +317,17 @@ class AppHandler(BaseHandler):
             if not (authdb.enabled() and authdb.SSO_URL):
                 self._redirect("/login")
                 return
+            state = secrets.token_hex(16)
+            next_url = self._query().get("next", "/")
+            if not re.match(r"^/(?![/\\])", next_url):
+                next_url = "/"
             query = urllib.parse.urlencode({"client_id": authdb.SERVICE_ID, "redirect_uri": SSO_CALLBACK,
-                                            "response_type": "code"})
-            self._redirect(f"{authdb.SSO_URL}/oauth/authorize?{query}")
+                                            "response_type": "code", "state": state})
+            cookie_val = f"{state}:{urllib.parse.quote(next_url)}"
+            self._send(302, b"", "text/plain; charset=utf-8", {
+                "Location": f"{authdb.SSO_URL}/oauth/authorize?{query}",
+                "Set-Cookie": f"sso_state={cookie_val}; Path=/auth/sso/callback; HttpOnly; Secure; SameSite=Lax; Max-Age=300",
+            })
             return
         if path == "/auth/sso/callback":
             self._sso_callback(email)
@@ -322,8 +356,14 @@ class AppHandler(BaseHandler):
         if path in ("/", "/index.html"):
             self._file("index.html" if running else "tunnel.html", "text/html; charset=utf-8")
         elif path == "/api/whoami":
+            auth_url = authdb.SSO_URL or (f"https://auth.{passkey.COMMON_RP_ID}" if passkey.COMMON_RP_ID else "")
             self._json(200, {"can_edit": running, "who": email, "credential": sess["credential"],
                              "role": self.role, "tailscale_running": running, "common": passkey.common_enabled(),
+                             "user_id": sess.get("auth_user_id"),
+                             "display_name": sess.get("display_name"),
+                             "username": sess.get("username"),
+                             "avatar_url": sess.get("avatar_url"),
+                             "auth_url": auth_url,
                              "reason": "" if running else "Pi の Tailscale がオフのため、ボードは使えません"})
         elif path == "/api/tailscale":
             self._json(200, {"authorized": True, "who": email, **actions.tailscale_state()})
@@ -432,6 +472,21 @@ class AppHandler(BaseHandler):
                 return
             if path == "/api/passkey/remove":
                 cred_id = str(data.get("id", ""))
+                user_id = sess.get("auth_user_id")
+                # 最後の 1 本は消せない
+                if passkey.common_enabled() and user_id:
+                    try:
+                        common_ids = authdb.common_credential_ids(user_id)
+                        if len(common_ids) <= 1 and cred_id in common_ids:
+                            self._json(400, {"error": "最後の共通パスキーは削除できません"})
+                            return
+                    except authdb.AuthDbError:
+                        pass
+                else:
+                    creds = [c for c in passkey.credentials() if not c.get("common")]
+                    if len(creds) <= 1:
+                        self._json(400, {"error": "最後のパスキーは削除できません"})
+                        return
                 if not passkey.remove_credential(cred_id, sess.get("auth_user_id"), self._ip(),
                                                  self.headers.get("User-Agent", "")):
                     self._json(404, {"error": "そのパスキーは見つかりません"})
@@ -491,26 +546,66 @@ class AppHandler(BaseHandler):
 
     def _sso_callback(self, email: str) -> None:
         """共通認証基盤の SSO から戻ってきたとき。認可コードを auth-db で確かめてセッションを作る。"""
+        cookie_header = self.headers.get("Cookie", "")
+        cookie_state = None
+        cookie_next = "/"
+        for part in cookie_header.split(";"):
+            part = part.strip()
+            if part.startswith("sso_state="):
+                val = part[len("sso_state="):]
+                if ":" in val:
+                    cookie_state, raw_next = val.split(":", 1)
+                    cookie_next = urllib.parse.unquote(raw_next)
+                else:
+                    cookie_state = val
+                break
+
+        query_state = self._query().get("state")
+        clear_state_cookie = "sso_state=; Path=/auth/sso/callback; HttpOnly; Secure; SameSite=Lax; Max-Age=0"
+
+        # state の照合（CSRF 対策）。state が無い・一致しないコールバックは拒否する。
+        # auth ポータルからの開始も各サービス自身の SSO 開始 URL（/auth/sso/login）を経由する前提。
+        if not cookie_state or not query_state or not secrets.compare_digest(cookie_state, query_state):
+            print("sso: state verification failed or missing", flush=True)
+            self._audit("sso.login", email, None, ok=False, message="SSO の state 検証に失敗しました")
+            self._send(302, b"", "text/plain; charset=utf-8", {
+                "Location": "/login",
+                "Set-Cookie": clear_state_cookie,
+            })
+            return
+
+        # ログイン後の戻り先は ^/(?![/\\]) に合うパスだけ（//evil.com や /\evil.com を拒否）
+        if not re.match(r"^/(?![/\\])", cookie_next):
+            cookie_next = "/"
+
         code = self._query().get("code")
         if not code or not authdb.enabled():
-            self._redirect("/login")
+            self._send(302, b"", "text/plain; charset=utf-8", {
+                "Location": "/login",
+                "Set-Cookie": clear_state_cookie,
+            })
             return
         code_hash = hashlib.sha256(code.encode()).hexdigest()
         try:
-            row = authdb.oauth_code(code_hash, SSO_CALLBACK)
-            if row:
-                authdb.consume_oauth_code(code_hash)  # 1 回だけ使えるようにする
+            # DELETE ... RETURNING user_id の 1 回でアトミックに消費
+            row = authdb.consume_oauth_code(code_hash, SSO_CALLBACK)
         except authdb.AuthDbError as ex:
             print(f"sso: {ex}", flush=True)
             row = None
         if not authdb.allowed(row):
             self._audit("sso.login", email, None, ok=False, message="SSO でのログインを拒否しました")
-            self._redirect("/login")
+            self._send(302, b"", "text/plain; charset=utf-8", {
+                "Location": "/login",
+                "Set-Cookie": clear_state_cookie,
+            })
             return
         sid = passkey.sso_session(email, row)
         self._audit("sso.login", email, self._session_for(sid, email),
                     message=f"SSO でログインしました ({row.get('username')})")
-        self._send(302, b"", "text/plain; charset=utf-8", {"Location": "/", "Set-Cookie": passkey.cookie_for(sid)})
+        self._send(302, b"", "text/plain; charset=utf-8", {
+            "Location": cookie_next,
+            "Set-Cookie": [passkey.cookie_for(sid), clear_state_cookie],
+        })
 
     def _tailscale(self, email: str, sess: dict | None, data: dict) -> None:
         print(f"tailscale by {email}: running={data.get('running')}", flush=True)

@@ -76,7 +76,6 @@ def _load() -> bool:
 
 
 def observe(neighbors: list[dict]) -> None:
-    global _loaded
     with _lock:
         if not _loaded:
             had = _load()

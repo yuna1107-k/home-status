@@ -981,14 +981,35 @@ async function loadAccount() {
   if (!box) return;
   let list = [];
   try { list = (await (await fetch("/api/passkeys", { cache: "no-store" })).json()).passkeys || []; } catch { /* 一覧が出せなくても他は使える */ }
-  box.innerHTML = `<div class="list-rows">${list.map((c) => `<div class="list-row"><div class="grow"><div>${esc(c.name)}${c.common ? ' <span class="tag">共通</span>' : ""}${c.name === state.who.credential ? ' <span class="tag ok">使用中</span>' : ""}</div>
+
+
+  const name = state.who.display_name || state.who.username || state.who.who || "アカウント";
+  const avatarHtml = state.who.avatar_url
+    ? `<img class="account-avatar-img" src="${esc(state.who.avatar_url)}" alt="">`
+    : `<span class="account-avatar-fallback">${icon("user")}</span>`;
+
+  const profileHtml = `<div class="account-card">
+    <div class="account-profile">
+      <div class="account-avatar">${avatarHtml}</div>
+      <div class="account-details">
+        <div class="account-name">${esc(name)}${state.who.display_name && state.who.username ? ` <span class="sub">@${esc(state.who.username)}</span>` : ""}</div>
+        <div class="account-email sub">${esc(state.who.who || "")}</div>
+      </div>
+    </div>
+  </div>`;
+
+  box.innerHTML = `${profileHtml}<div class="list-rows">${list.map((c) => `<div class="list-row"><div class="grow"><div>${esc(c.name)}${c.common ? ' <span class="tag">共通</span>' : ""}${c.name === state.who.credential ? ' <span class="tag ok">使用中</span>' : ""}</div>
       <div class="sub">登録 ${esc(c.created_at)} · 最終使用 ${esc(c.last_used_at || "-")}</div></div>
       ${c.common ? '<div class="sub">全サービス共通のパスキーです</div>' : ""}</div>
-      <button class="btn small danger" type="button" data-pk="${esc(c.id)}" data-common="${c.common ? 1 : ""}">削除</button></div>`).join("")}</div>
+      <button class="btn small danger" type="button" data-pk="${esc(c.id)}" data-common="${c.common ? 1 : ""}" ${list.length <= 1 ? "disabled title=\"最後のパスキーは削除できません\"" : ""}>削除</button></div>`).join("")}</div>
     <div class="form" style="margin-top:14px"><div class="field"><span class="lbl">この端末の名前</span><input type="text" id="pk-name" maxlength="40" value="${esc(deviceName())}"></div>
     <div class="form-actions"><button class="btn small danger" type="button" id="pk-logout">ログアウト</button><button class="btn small primary" type="button" id="pk-add">${icon("plus")}この端末のパスキーを追加</button></div>
     <p class="note">パスキーを同期していない端末を追加するときは、その端末でログイン画面を開き、「パスキーでログイン」→ 別の端末（パスキーがある端末）で QR コードを読み取ってログインしてから、ここで追加します。${state.who.common ? "ここで追加するパスキーは全サービス共通のパスキーになります。" : "すべて削除すると、次に開いたときに最初の登録からやり直しになります。"}</p></div>`;
   box.querySelectorAll("[data-pk]").forEach((b) => b.addEventListener("click", async () => {
+    if (list.length <= 1) {
+      toast("最後のパスキーは削除できません", true);
+      return;
+    }
     const message = b.dataset.common
       ? "全サービス共通のパスキーです。共通アカウントからも削除され、すべてのサービスでこのパスキーを使えなくなります。"
       : "削除した端末ではログインできなくなります。";
@@ -1156,7 +1177,24 @@ async function loadWho() {
   } catch {
     state.who = { can_edit: false, who: "" };
   }
-  text("who-text", state.who.who || "未ログイン");
+  const whoBtn = $("who");
+  const whoText = $("who-text");
+  const displayName = state.who.display_name || state.who.username || state.who.who || "未ログイン";
+  if (whoText) whoText.textContent = displayName;
+  if (whoBtn && state.who.avatar_url) {
+    const existing = whoBtn.querySelector(".who-avatar");
+    if (existing) {
+      existing.src = state.who.avatar_url;
+    } else {
+      const svg = whoBtn.querySelector("svg");
+      if (svg) svg.style.display = "none";
+      const img = document.createElement("img");
+      img.className = "who-avatar";
+      img.src = state.who.avatar_url;
+      img.alt = "";
+      whoBtn.insertBefore(img, whoText);
+    }
+  }
   if (state.data) update();
 }
 

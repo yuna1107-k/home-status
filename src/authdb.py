@@ -52,7 +52,7 @@ def _query(sql: str, params: list) -> list[dict]:
 
 
 # 利用者とこのサイトの権限をまとめて引く列
-_USER_COLS = """u.id AS user_id, u.username, u.display_name, u.status AS user_status,
+_USER_COLS = """u.id AS user_id, u.username, u.display_name, u.avatar_url, u.status AS user_status,
                 u.global_role, us.is_enabled"""
 _USER_JOIN = "LEFT JOIN user_services us ON us.user_id = u.id AND us.service_id = ?"
 
@@ -97,19 +97,29 @@ def common_credential_ids(user_id: str) -> list[str]:
     return [r["id"] for r in rows]
 
 
-def oauth_code(code_hash: str, redirect_uri: str) -> dict | None:
-    """SSO の認可コード（未使用・期限内・このサイト宛て）の持ち主と権限。"""
+def consume_oauth_code(code_hash: str, redirect_uri: str) -> dict | None:
+    """SSO の認可コードを 1 回でアトミックに消費し、持ち主のユーザー情報を返す。
+
+    DELETE ... WHERE code_hash=? AND client_id=? AND redirect_uri=? AND expires_at>? RETURNING user_id
+    ですでに消費済み・期限切れ・宛先違いなら None を返す。
+    """
     rows = _query(
-        f"""SELECT {_USER_COLS}
-            FROM oauth_codes c JOIN users u ON u.id = c.user_id {_USER_JOIN}
-            WHERE c.code_hash = ? AND c.client_id = ? AND c.redirect_uri = ? AND c.expires_at > ?""",
-        [SERVICE_ID, code_hash, SERVICE_ID, redirect_uri, int(time.time() * 1000)],
+        """DELETE FROM oauth_codes
+           WHERE code_hash = ? AND client_id = ? AND redirect_uri = ? AND expires_at > ?
+           RETURNING user_id""",
+        [code_hash, SERVICE_ID, redirect_uri, int(time.time() * 1000)],
     )
-    return dict(rows[0]) if rows else None
+    if not rows:
+        return None
+    user_id = rows[0].get("user_id")
+    if not user_id:
+        return None
+    return user(user_id)
 
 
-def consume_oauth_code(code_hash: str) -> None:
-    _query("DELETE FROM oauth_codes WHERE code_hash = ?", [code_hash])
+def oauth_code(code_hash: str, redirect_uri: str) -> dict | None:
+    """互換性のためのエイリアス。アトミックに消費してユーザーを返す。"""
+    return consume_oauth_code(code_hash, redirect_uri)
 
 
 def add_common_credential(*, cred_id: str, user_id: str, cose: bytes, counter: int, transports: list | None,

@@ -7,6 +7,7 @@ import os
 import struct
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -448,6 +449,36 @@ class CommonAuthTest(unittest.TestCase):
         opts = passkey.common_registration_options(EMAIL, sess)
         with self.assertRaises(passkey.PasskeyError):
             passkey.register_common(EMAIL, sess, Authenticator().create(opts["challenge"]))
+
+    def test_session_contains_avatar_and_display_name(self):
+        self.db.users[USER_ID]["avatar_url"] = "https://auth.example.com/avatars/001?v=1"
+        self.db.users[USER_ID]["display_name"] = "Alice"
+        a = self.common_auth()
+        sid = self.login(a)
+        sess = self.sess(sid)
+        self.assertEqual(sess.get("avatar_url"), "https://auth.example.com/avatars/001?v=1")
+        self.assertEqual(sess.get("display_name"), "Alice")
+        self.assertEqual(sess.get("username"), "owner")
+
+        # 60秒後の再確認で更新されることの確認
+        self.db.users[USER_ID]["display_name"] = "Alice Updated"
+        self.db.users[USER_ID]["avatar_url"] = "https://auth.example.com/avatars/001?v=2"
+        now = time.time()
+        with passkey._lock:
+            passkey._sessions[sid]["checked_at"] = now - 61
+        sess2 = self.sess(sid)
+        self.assertIsNotNone(sess2)
+        self.assertEqual(sess2.get("display_name"), "Alice Updated")
+        self.assertEqual(sess2.get("avatar_url"), "https://auth.example.com/avatars/001?v=2")
+
+    def test_sso_session_contains_avatar(self):
+        row = {"user_id": USER_ID, "username": "sso_user", "display_name": "SSO User",
+               "avatar_url": "https://auth.example.com/avatars/sso?v=1", "is_enabled": 1, "user_status": "active"}
+        sid = passkey.sso_session(EMAIL, row)
+        sess = self.sess(sid)
+        self.assertEqual(sess.get("avatar_url"), "https://auth.example.com/avatars/sso?v=1")
+        self.assertEqual(sess.get("display_name"), "SSO User")
+        self.assertEqual(sess.get("username"), "sso_user")
 
 
 class LinkToolTest(CommonAuthTest):
