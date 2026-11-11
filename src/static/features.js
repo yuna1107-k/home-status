@@ -297,7 +297,7 @@ const ACTION_LABELS = {
   "nextcloud.restart": "コンテナの再起動", "tailscale.serve.add": "Serve の追加", "tailscale.serve.remove": "Serve の削除",
   "tailscale.set_running": "Tailscale のオン/オフ", "network.scan": "LAN の再スキャン",
   "lan.device": "LAN の端末の設定", "lan.known_all": "端末をすべて既知に", "health.refresh": "アップデートの確認",
-  "passkey.login": "ログイン", "passkey.logout": "ログアウト", "passkey.register": "パスキーの登録",
+  "passkey.login": "ログイン", "passkey.logout": "ログアウト", "passkey.register": "パスキーの登録", "passkey.register_common": "共通パスキーの登録", "sso.login": "SSO ログイン",
   "passkey.remove": "パスキーの削除", "settings.update": "設定の変更",
 };
 const actionLabel = (a) => ACTION_LABELS[a] || a;

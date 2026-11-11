@@ -18,7 +18,10 @@ os.environ["CLOUD_OUTBOX"] = str(Path(tempfile.mkdtemp()) / "outbox.jsonl")
 from cryptography.hazmat.primitives import hashes  # noqa: E402
 from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402
 
+import authdb  # noqa: E402
 import passkey  # noqa: E402
+
+authdb.OWNER_USER_ID = ""  # .env に設定があってもテストでは使わない
 
 EMAIL = "user@example.com"
 
@@ -56,12 +59,14 @@ class Authenticator:
     def _auth_data(self, flags, extra=b"", rp_id=passkey.RP_ID):
         return hashlib.sha256(rp_id.encode()).digest() + bytes([flags]) + struct.pack(">I", self.count) + extra
 
-    def create(self, challenge, origin=passkey.ORIGIN, flags=0x45):
+    def cose(self):
         nums = self.key.public_key().public_numbers()
-        cose = cbor({1: 2, 3: -7, -1: 1, -2: nums.x.to_bytes(32, "big"), -3: nums.y.to_bytes(32, "big")})
-        att = b"\0" * 16 + struct.pack(">H", len(self.cred_id)) + self.cred_id + cose
+        return cbor({1: 2, 3: -7, -1: 1, -2: nums.x.to_bytes(32, "big"), -3: nums.y.to_bytes(32, "big")})
+
+    def create(self, challenge, origin=passkey.ORIGIN, flags=0x45, rp_id=passkey.RP_ID):
+        att = b"\0" * 16 + struct.pack(">H", len(self.cred_id)) + self.cred_id + self.cose()
         client = json.dumps({"type": "webauthn.create", "challenge": challenge, "origin": origin}).encode()
-        obj = cbor({"fmt": "none", "attStmt": {}, "authData": self._auth_data(flags, att)})
+        obj = cbor({"fmt": "none", "attStmt": {}, "authData": self._auth_data(flags, att, rp_id=rp_id)})
         return {"id": b64(self.cred_id), "name": "テスト端末",
                 "response": {"clientDataJSON": b64(client), "attestationObject": b64(obj)}}
 
@@ -77,6 +82,7 @@ class Authenticator:
 
 class PasskeyTest(unittest.TestCase):
     def setUp(self):
+        passkey.COMMON_RP_ID = ""  # 共通アカウントなし（.env に設定があっても使わない）
         Path(os.environ["PASSKEY_STORE"]).unlink(missing_ok=True)
         self.auth = Authenticator()
         opts = passkey.registration_options(EMAIL)
@@ -144,6 +150,383 @@ class PasskeyTest(unittest.TestCase):
         self.assertTrue(passkey.remove_credential(cred))
         self.assertFalse(passkey.has_credentials())
         self.assertIsNone(passkey.session(f"{passkey.COOKIE}={sid}", EMAIL))
+
+
+
+COMMON = "example.com"
+USER_ID = "00000000-0000-4000-8000-000000000001"
+
+
+class FakeAuthDb:
+    """authdb の問い合わせを差し替える（共通認証基盤の D1 の代わり）。"""
+
+    def __init__(self):
+        self.users = {USER_ID: {"user_id": USER_ID, "username": "owner", "display_name": "Owner",
+                                "user_status": "active", "global_role": "admin", "is_enabled": 1}}
+        self.creds = {}  # id -> {rp_id, user_id, public_key, name}
+        self.added = []
+        self.audits = []
+        self.down = False
+        self.audit_down = False
+
+    def _check(self):
+        if self.down:
+            raise authdb.AuthDbError("共通アカウントを確認できません（テスト）")
+
+    def credential(self, cred_id):
+        self._check()
+        c = self.creds.get(cred_id)
+        return {**c, **self.users[c["user_id"]], "id": cred_id} if c else None
+
+    def user(self, user_id):
+        self._check()
+        u = self.users.get(user_id)
+        return dict(u) if u else None
+
+    def common_credential_ids(self, user_id):
+        self._check()
+        return [i for i, c in self.creds.items() if c["user_id"] == user_id and c["rp_id"] == COMMON]
+
+    def add_common_credential(self, **kw):
+        self._check()
+        self.added.append(kw)
+        self.creds[kw["cred_id"]] = {"rp_id": COMMON, "user_id": kw["user_id"], "public_key": kw["cose"],
+                                     "name": kw["name"]}
+
+    def delete_common_credential(self, cred_id, user_id):
+        self._check()
+        c = self.creds.get(cred_id)
+        if c and c["user_id"] == user_id and c["rp_id"] == COMMON:
+            del self.creds[cred_id]
+
+    def audit(self, action, user_id, details, ip="", user_agent=""):
+        self._check()
+        if self.audit_down:
+            raise authdb.AuthDbError("audit down")
+        self.audits.append((action, user_id, details))
+
+
+class CommonAuthTest(unittest.TestCase):
+    def setUp(self):
+        Path(os.environ["PASSKEY_STORE"]).unlink(missing_ok=True)
+        passkey._sessions.clear()
+        self.db = FakeAuthDb()
+        self._saved = {n: getattr(authdb, n) for n in
+                       ("credential", "user", "common_credential_ids", "add_common_credential",
+                        "delete_common_credential", "audit")}
+        for name in self._saved:
+            setattr(authdb, name, getattr(self.db, name))
+        passkey.COMMON_RP_ID = COMMON
+
+    def tearDown(self):
+        for name, fn in self._saved.items():
+            setattr(authdb, name, fn)
+        passkey.COMMON_RP_ID = ""
+
+    def common_auth(self):
+        a = Authenticator()
+        self.db.creds[b64(a.cred_id)] = {"rp_id": COMMON, "user_id": USER_ID, "public_key": a.cose(), "name": "共通"}
+        return a
+
+    def legacy_auth(self, in_auth_db=True):
+        """共通アカウント導入前に作ったこのサイトのパスキー（auth-db にも取り込み済み）。"""
+        a = Authenticator()
+        passkey.COMMON_RP_ID = ""
+        opts = passkey.registration_options(EMAIL)
+        passkey.register(EMAIL, a.create(opts["challenge"]))
+        passkey.COMMON_RP_ID = COMMON
+        if in_auth_db:
+            self.db.creds[b64(a.cred_id)] = {"rp_id": passkey.RP_ID, "user_id": USER_ID, "public_key": a.cose(),
+                                             "name": "旧"}
+        return a
+
+    def login(self, a, common=True, **kw):
+        opts = passkey.login_options(EMAIL, common=common)
+        kw.setdefault("rp_id", opts["rpId"])
+        return passkey.login(EMAIL, a.get(opts["challenge"], **kw))
+
+    def sess(self, sid):
+        return passkey.session(f"{passkey.COOKIE}={sid}", EMAIL)
+
+    def test_common_login(self):
+        a = self.common_auth()
+        opts = passkey.login_options(EMAIL)
+        self.assertEqual((opts["rpId"], opts["common"], opts["allowCredentials"]), (COMMON, True, []))
+        sess = self.sess(self.login(a))
+        self.assertEqual(sess["auth_user_id"], USER_ID)
+        self.assertFalse(sess["needs_migration"])
+        local = passkey.credentials()
+        self.assertEqual(len(local), 1)
+        self.assertTrue(local[0]["common"])
+
+    def test_common_rp_must_match_challenge(self):
+        a = self.common_auth()
+        with self.assertRaises(passkey.PasskeyError):
+            self.login(a, rp_id=passkey.RP_ID)  # 共通のチャレンジにこのサイトの RP ID
+        b = self.legacy_auth()
+        with self.assertRaises(passkey.PasskeyError):
+            self.login(b, common=False, rp_id=COMMON)  # このサイトのチャレンジに共通の RP ID
+
+    def test_common_credential_removed_from_auth_db(self):
+        a = self.common_auth()
+        self.login(a)
+        del self.db.creds[b64(a.cred_id)]
+        with self.assertRaises(passkey.PasskeyError):
+            self.login(a)
+
+    def test_access_rules(self):
+        a = self.common_auth()
+        user = self.db.users[USER_ID]
+        user.update(global_role="member", is_enabled=0)
+        with self.assertRaises(passkey.PasskeyError):
+            self.login(a)
+        user.update(is_enabled=1)
+        self.login(a)
+        user.update(user_status="suspended")
+        with self.assertRaises(passkey.PasskeyError):
+            self.login(a)
+        user.update(user_status="active", is_enabled=1)
+        self.login(a)
+        # 管理者でも、このサイトの利用が許可されていなければ使えない
+        user.update(global_role="admin", is_enabled=0)
+        with self.assertRaises(passkey.PasskeyError):
+            self.login(a)
+        user.update(is_enabled=None)  # user_services の行が無い
+        with self.assertRaises(passkey.PasskeyError):
+            self.login(a)
+
+    def test_auth_db_down_at_login(self):
+        a = self.common_auth()
+        self.db.down = True
+        with self.assertRaises(passkey.PasskeyError):
+            self.login(a)
+
+    def test_admin_revocation_ends_session(self):
+        sid = self.login(self.common_auth())
+        self.db.users[USER_ID].update(is_enabled=0)  # 管理者のまま、このサイトだけ無効
+        passkey._sessions[sid]["checked_at"] -= passkey.AUTH_RECHECK_SECONDS + 1
+        self.assertIsNone(self.sess(sid))
+
+    def test_revocation_ends_session(self):
+        sid = self.login(self.common_auth())
+        self.assertIsNotNone(self.sess(sid))
+        self.db.users[USER_ID].update(global_role="member", is_enabled=0)
+        self.assertIsNotNone(self.sess(sid))  # 確かめ直すまでは前回の結果
+        passkey._sessions[sid]["checked_at"] -= passkey.AUTH_RECHECK_SECONDS + 1
+        self.assertIsNone(self.sess(sid))
+        self.assertNotIn(sid, passkey._sessions)
+
+    def test_auth_db_down_grace(self):
+        sid = self.login(self.common_auth())
+        self.db.down = True
+        passkey._sessions[sid]["checked_at"] -= passkey.AUTH_RECHECK_SECONDS + 1
+        self.assertIsNotNone(self.sess(sid))
+        passkey._sessions[sid]["checked_at"] -= passkey.AUTH_RECHECK_SECONDS + 1
+        passkey._sessions[sid]["ok_at"] -= passkey.AUTH_GRACE_SECONDS + 1
+        self.assertIsNone(self.sess(sid))
+
+    def test_legacy_login_via_auth_db_credential(self):
+        a = self.legacy_auth()
+        sess = self.sess(self.login(a, common=False))
+        self.assertEqual(sess["auth_user_id"], USER_ID)
+        self.assertTrue(sess["needs_migration"])
+
+    def test_legacy_not_in_auth_db_rejected(self):
+        a = self.legacy_auth(in_auth_db=False)
+        with self.assertRaises(passkey.PasskeyError):
+            self.login(a, common=False)
+
+    def test_legacy_revoked_in_auth_db(self):
+        a = self.legacy_auth()
+        sid = self.login(a, common=False)
+        del self.db.creds[b64(a.cred_id)]  # auth で取り消した
+        with self.assertRaises(passkey.PasskeyError):
+            self.login(a, common=False)
+        passkey._sessions[sid]["checked_at"] -= passkey.AUTH_RECHECK_SECONDS + 1
+        self.assertIsNone(self.sess(sid))  # 使っていたセッションも終わる
+
+    def test_legacy_rp_mismatch_in_auth_db(self):
+        a = self.legacy_auth()
+        self.db.creds[b64(a.cred_id)]["rp_id"] = COMMON
+        with self.assertRaises(passkey.PasskeyError):
+            self.login(a, common=False)
+
+    def test_owner_only(self):
+        other = "00000000-0000-4000-8000-000000000002"
+        self.db.users[other] = {**self.db.users[USER_ID], "user_id": other, "username": "other"}
+        a = self.common_auth()
+        self.db.creds[b64(a.cred_id)]["user_id"] = other
+        authdb.OWNER_USER_ID = USER_ID
+        try:
+            with self.assertRaises(passkey.PasskeyError):
+                self.login(a)
+            self.db.creds[b64(a.cred_id)]["user_id"] = USER_ID
+            self.login(a)
+        finally:
+            authdb.OWNER_USER_ID = ""
+
+    def test_migrate_to_common(self):
+        a = self.legacy_auth()
+        sid = self.login(a, common=False)
+        sess = self.sess(sid)
+        self.assertTrue(sess["needs_migration"])
+        opts = passkey.common_registration_options(EMAIL, sess)
+        self.assertEqual(opts["rp"]["id"], COMMON)
+        self.assertEqual(passkey.unb64url(opts["user"]["id"]).decode(), USER_ID)
+        new = Authenticator()
+        body = new.create(opts["challenge"], rp_id=COMMON)
+        body["response"]["transports"] = ["internal", "hybrid"]
+        passkey.register_common(EMAIL, sess, body)
+        added = self.db.added[0]
+        # 公開鍵は COSE のバイト列そのもの（余分なバイトを含まない）
+        self.assertEqual(added["cose"], new.cose())
+        self.assertEqual((added["user_id"], added["transports"]), (USER_ID, ["internal", "hybrid"]))
+        self.assertFalse(self.sess(sid)["needs_migration"])
+        self.assertEqual(sum(c["common"] for c in passkey.credentials()), 1)
+        self.assertEqual(self.db.audits, [("passkey.register", USER_ID, {"via": "status"})])
+        # 作った共通パスキーでログインできる
+        self.assertEqual(self.sess(self.login(new))["auth_user_id"], USER_ID)
+
+    def test_migrate_not_saved_locally_when_auth_db_fails(self):
+        a = self.legacy_auth()
+        sess = self.sess(self.login(a, common=False))
+        opts = passkey.common_registration_options(EMAIL, sess)
+        self.db.down = True
+        with self.assertRaises(passkey.PasskeyError):
+            passkey.register_common(EMAIL, sess, Authenticator().create(opts["challenge"], rp_id=COMMON))
+        self.assertEqual(len(passkey.credentials()), 1)
+
+    def test_audit_failure_does_not_undo_registration(self):
+        sess = self.sess(self.login(self.legacy_auth(), common=False))
+        opts = passkey.common_registration_options(EMAIL, sess)
+        self.db.audit_down = True
+        passkey.register_common(EMAIL, sess, Authenticator().create(opts["challenge"], rp_id=COMMON))
+        self.assertEqual(len(self.db.added), 1)
+        self.assertEqual(sum(c["common"] for c in passkey.credentials()), 1)
+
+    def test_registration_options_exclude_existing_common(self):
+        a = self.common_auth()
+        sess = self.sess(self.login(a))
+        opts = passkey.common_registration_options(EMAIL, sess)
+        self.assertEqual([c["id"] for c in opts["excludeCredentials"]], [b64(a.cred_id)])
+        sel = opts["authenticatorSelection"]
+        self.assertEqual((sel["residentKey"], sel["userVerification"]), ("required", "required"))
+
+    def test_remove_common_deletes_from_auth_db(self):
+        a = self.common_auth()
+        sid = self.login(a)
+        cid = b64(a.cred_id)
+        self.assertTrue(passkey.remove_credential(cid, USER_ID))
+        self.assertNotIn(cid, self.db.creds)
+        self.assertEqual(self.db.audits[-1][0], "passkey.delete")
+        self.assertEqual(passkey.credentials(), [])
+        self.assertIsNotNone(self.sess(sid))  # 共通アカウントがあればセッションは残す
+
+    def test_remove_common_other_owner_rejected(self):
+        a = self.common_auth()
+        self.login(a)
+        with self.assertRaises(passkey.PasskeyError):
+            passkey.remove_credential(b64(a.cred_id), "someone-else")
+        self.assertIn(b64(a.cred_id), self.db.creds)
+
+    def test_remove_common_kept_when_auth_db_fails(self):
+        a = self.common_auth()
+        self.login(a)
+        self.db.down = True
+        with self.assertRaises(passkey.PasskeyError):
+            passkey.remove_credential(b64(a.cred_id), USER_ID)
+        self.assertEqual(len(passkey.credentials()), 1)
+
+    def test_remove_legacy_is_local_only(self):
+        a = self.legacy_auth(in_auth_db=False)
+        self.assertTrue(passkey.remove_credential(b64(a.cred_id), USER_ID))
+        self.assertEqual(self.db.audits, [])
+
+    def test_migrate_rejects_wrong_rp(self):
+        a = self.legacy_auth()
+        sess = self.sess(self.login(a, common=False))
+        opts = passkey.common_registration_options(EMAIL, sess)
+        with self.assertRaises(passkey.PasskeyError):
+            passkey.register_common(EMAIL, sess, Authenticator().create(opts["challenge"]))
+
+
+class LinkToolTest(CommonAuthTest):
+    """tools/passkey_link_auth.py: 手元の控えを auth-db に揃える（何度実行しても同じ）。"""
+
+    def test_plan_is_idempotent(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "tools"))
+        import passkey_link_auth as tool
+        keep = self.legacy_auth()
+        gone = self.legacy_auth(in_auth_db=False)
+        other = self.legacy_auth()
+        uid2 = "00000000-0000-4000-8000-000000000002"
+        self.db.users[uid2] = {**self.db.users[USER_ID], "user_id": uid2, "username": "other"}
+        self.db.creds[b64(other.cred_id)]["user_id"] = uid2
+        authdb.OWNER_USER_ID = USER_ID
+        try:
+            data = passkey._load()
+            result, notes = tool.plan(data)
+            ids = [c["id"] for c in result["credentials"]]
+            self.assertEqual(ids, [b64(keep.cred_id)])
+            self.assertNotIn(b64(gone.cred_id), ids)
+            self.assertEqual(result["credentials"][0]["auth_user_id"], USER_ID)
+            self.assertEqual(passkey.unb64url(result["user_id"]).decode(), USER_ID)
+            self.assertEqual(tool.plan(result), (result, []))
+        finally:
+            authdb.OWNER_USER_ID = ""
+
+
+class AuthDbSqlTest(unittest.TestCase):
+    """auth-db への SQL と、公開鍵のバイト列の受け渡し。"""
+
+    def setUp(self):
+        self.calls = []
+        self._query = authdb.cloud.query
+        authdb.cloud.query = self.fake_query
+        self.rows = []
+
+    def tearDown(self):
+        authdb.cloud.query = self._query
+
+    def fake_query(self, sql, params, timeout=15, database=None):
+        self.calls.append((sql, params, database))
+        return self.rows
+
+    def test_add_common_credential_stores_exact_bytes(self):
+        cose = Authenticator().cose()
+        authdb.add_common_credential(cred_id="abc", user_id=USER_ID, cose=cose, counter=0,
+                                     transports=["internal"], name="Mac", flags=0x5D, aaguid=b"\x01" * 16)
+        sql, params, database = self.calls[0]
+        self.assertIn("unhex(?)", sql)
+        self.assertNotIn("INSERT INTO users", sql)
+        self.assertEqual(bytes.fromhex(params[2]), cose)
+        self.assertEqual(database, authdb.AUTH_DB_ID)
+        self.assertEqual(params[5:7], ["multiDevice", 1])
+
+    def test_credential_decodes_hex_blob(self):
+        cose = Authenticator().cose()
+        self.rows = [{"id": "abc", "rp_id": COMMON, "name": "x", "public_key_hex": cose.hex().upper(),
+                      "user_id": USER_ID, "user_status": "active", "global_role": "admin", "is_enabled": None}]
+        self.assertEqual(authdb.credential("abc")["public_key"], cose)
+
+    def test_delete_and_audit_sql(self):
+        authdb.delete_common_credential("abc", USER_ID)
+        sql, params, _ = self.calls[-1]
+        self.assertIn("DELETE FROM credentials", sql)
+        self.assertEqual(params, ["abc", USER_ID, authdb.COMMON_RP_ID])
+        authdb.audit("passkey.register", USER_ID, {"via": "status"}, "1.2.3.4", "UA")
+        sql, params, _ = self.calls[-1]
+        self.assertIn("INSERT INTO audit_logs", sql)
+        self.assertEqual(params[2:7], [USER_ID, USER_ID, authdb.SERVICE_ID, "passkey.register", '{"via":"status"}'])
+
+    def test_allowed(self):
+        self.assertFalse(authdb.allowed(None))
+        self.assertFalse(authdb.allowed({"user_status": "active", "global_role": "admin", "is_enabled": 0}))
+        self.assertFalse(authdb.allowed({"user_status": "active", "global_role": "admin", "is_enabled": None}))
+        self.assertTrue(authdb.allowed({"user_status": "active", "global_role": "admin", "is_enabled": 1}))
+        self.assertTrue(authdb.allowed({"user_status": "active", "global_role": "member", "is_enabled": 1}))
+        self.assertFalse(authdb.allowed({"user_status": "active", "global_role": "member", "is_enabled": None}))
+        self.assertFalse(authdb.allowed({"user_status": "suspended", "global_role": "admin", "is_enabled": 1}))
 
 
 if __name__ == "__main__":

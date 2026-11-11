@@ -13,9 +13,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -23,6 +25,7 @@ import actions
 import alerts
 import audit
 import auth
+import authdb
 import boots
 import cloud
 import collectors
@@ -37,6 +40,7 @@ from sampler import SAMPLER
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 PUBLIC_URL = f"https://{passkey.RP_ID}"
+SSO_CALLBACK = f"{PUBLIC_URL}/auth/sso/callback"
 ASSETS = {
     "/app.css": ("app.css", "text/css; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
@@ -225,7 +229,7 @@ class AppHandler(BaseHandler):
             return None
         return data
 
-    def _stream(self) -> None:
+    def _stream(self, email: str) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -245,6 +249,9 @@ class AppHandler(BaseHandler):
                 with HUB.cond:
                     HUB.cond.wait_for(lambda: HUB.version != last, timeout=15)
                     version, payload = HUB.version, HUB.payload
+                if not self._session(email):
+                    # ログアウト・共通アカウントの権限の取り消し。閉じると画面側がログインへ移る
+                    return
                 if not tailscale_running():
                     # Tailscale がオフになったらボードの配信をやめる（画面側はオン/オフ画面に切り替わる）
                     self.wfile.write(b"event: tailscale-off\ndata: {}\n\n")
@@ -281,43 +288,15 @@ class AppHandler(BaseHandler):
         sess = self._session(email)
 
         if path == "/auth/sso/login":
-            redirect_uri = urllib.parse.quote("https://status.yuna1107.com/auth/sso/callback", safe="")
-            self._redirect(f"https://auth.yuna1107.com/oauth/authorize?client_id=status&redirect_uri={redirect_uri}&response_type=code")
+            if not (authdb.enabled() and authdb.SSO_URL):
+                self._redirect("/login")
+                return
+            query = urllib.parse.urlencode({"client_id": authdb.SERVICE_ID, "redirect_uri": SSO_CALLBACK,
+                                            "response_type": "code"})
+            self._redirect(f"{authdb.SSO_URL}/oauth/authorize?{query}")
             return
         if path == "/auth/sso/callback":
-            q = self._query()
-            code = q.get("code")
-            if not code:
-                self._redirect("/login?error=missing_code")
-                return
-            code_hash = hashlib.sha256(code.encode()).hexdigest()
-            now_ms = int(time.time() * 1000)
-            try:
-                rows = cloud.query_auth_db(
-                    """SELECT c.user_id, u.username, u.display_name, u.status as user_status, p.is_enabled
-                       FROM oauth_codes c
-                       JOIN users u ON c.user_id = u.id
-                       LEFT JOIN user_services p ON u.id = p.user_id AND p.service_id = 'status'
-                       WHERE c.code_hash = ? AND c.client_id = 'status' AND c.expires_at > ?""",
-                    [code_hash, now_ms],
-                )
-                if rows:
-                    r = rows[0]
-                    if r.get("user_status") == "active" and (r.get("username") == "yuna" or r.get("is_enabled") == 1):
-                        cloud.query_auth_db("DELETE FROM oauth_codes WHERE code_hash = ?", [code_hash])
-                        sid = secrets.token_urlsafe(32)
-                        with passkey._lock:
-                            passkey._sessions[sid] = {
-                                "email": email or r.get("username"),
-                                "credential": f"SSO ({r.get('username')})",
-                                "expires": time.time() + passkey.SESSION_SECONDS,
-                            }
-                        self._audit("sso.login", email, {"credential": "SSO"}, message=f"SSOでログインしました ({r.get('username')})")
-                        self._send(302, b"", "text/plain", {"Location": "/", "Set-Cookie": passkey.cookie_for(sid)})
-                        return
-            except Exception as ex:
-                print(f"[sso] callback error: {ex}", flush=True)
-            self._redirect("/login?error=sso_unauthorized")
+            self._sso_callback(email)
             return
 
         if path == "/login":
@@ -327,7 +306,10 @@ class AppHandler(BaseHandler):
                 self._file("login.html", "text/html; charset=utf-8")
             return
         if path == "/api/passkey/state":
-            self._json(200, {"email": email, "registered": passkey.has_credentials(), "logged_in": bool(sess)})
+            # 共通アカウントが有効なら、手元にパスキーが無くても共通パスキーでログインできる
+            registered = passkey.has_credentials() or passkey.common_enabled()
+            self._json(200, {"email": email, "registered": registered, "logged_in": bool(sess),
+                             "common": passkey.common_enabled()})
             return
         if not sess:
             if path.startswith("/api/"):
@@ -341,7 +323,7 @@ class AppHandler(BaseHandler):
             self._file("index.html" if running else "tunnel.html", "text/html; charset=utf-8")
         elif path == "/api/whoami":
             self._json(200, {"can_edit": running, "who": email, "credential": sess["credential"],
-                             "role": self.role, "tailscale_running": running,
+                             "role": self.role, "tailscale_running": running, "common": passkey.common_enabled(),
                              "reason": "" if running else "Pi の Tailscale がオフのため、ボードは使えません"})
         elif path == "/api/tailscale":
             self._json(200, {"authorized": True, "who": email, **actions.tailscale_state()})
@@ -377,7 +359,7 @@ class AppHandler(BaseHandler):
         elif path == "/api/status":
             self._send(200, HUB.latest(), "application/json; charset=utf-8")
         elif path == "/api/stream":
-            self._stream()
+            self._stream(email)
         else:
             self._json(404, {"error": "not found"})
 
@@ -398,7 +380,7 @@ class AppHandler(BaseHandler):
         try:
             # ---- パスキー（ログイン前でも使うもの）
             if path == "/api/passkey/login/options":
-                common = data.get("common", True) if isinstance(data, dict) else True
+                common = bool(data.get("common", True)) and passkey.common_enabled()
                 if not common and not passkey.has_credentials():
                     self._json(409, {"error": "パスキーがまだ登録されていません"})
                     return
@@ -411,16 +393,21 @@ class AppHandler(BaseHandler):
                     self._audit("passkey.login", email, None, ok=False, message=str(ex))
                     raise
                 print(f"passkey login: {email}", flush=True)
-                new = self._session_for(sid, email)
+                new = self._session_for(sid, email) or {}
                 self._audit("passkey.login", email, new, message="ログインしました")
-                self._json(200, {"ok": True}, {"Set-Cookie": passkey.cookie_for(sid)})
+                self._json(200, {"ok": True, "needs_migration": bool(new.get("needs_migration"))},
+                           {"Set-Cookie": passkey.cookie_for(sid)})
                 return
             if path in ("/api/passkey/register/options", "/api/passkey/register"):
                 # 最初の 1 つだけは Cloudflare Access を通過した本人が登録できる。2 つ目以降はログイン中のみ
-                if passkey.has_credentials() and not sess:
+                # （共通アカウントが有効なら最初から共通パスキーでログインできるので、登録はログイン中のみ）
+                if (passkey.has_credentials() or passkey.common_enabled()) and not sess:
                     self._json(403, {"error": "パスキーを追加するには、登録済みのパスキーでログインしてください"})
                     return
-                if path.endswith("/options"):
+                if passkey.common_enabled():
+                    # 共通アカウントが有効なら、このサイトで作るパスキーはすべて共通パスキー
+                    self._register_common(email, sess, data, path.endswith("/options"))
+                elif path.endswith("/options"):
                     self._json(200, passkey.registration_options(email))
                 else:
                     cred = passkey.register(email, data)
@@ -440,9 +427,13 @@ class AppHandler(BaseHandler):
             if not sess:
                 self._json(401, {"error": "パスキーでログインしてください", "login": "/login"})
                 return
+            if path in ("/api/passkey/common/register/options", "/api/passkey/common/register"):
+                self._register_common(email, sess, data, path.endswith("/options"))
+                return
             if path == "/api/passkey/remove":
                 cred_id = str(data.get("id", ""))
-                if not passkey.remove_credential(cred_id):
+                if not passkey.remove_credential(cred_id, sess.get("auth_user_id"), self._ip(),
+                                                 self.headers.get("User-Agent", "")):
                     self._json(404, {"error": "そのパスキーは見つかりません"})
                     return
                 print(f"passkey removed by {email}: {cred_id[:12]}…", flush=True)
@@ -486,6 +477,40 @@ class AppHandler(BaseHandler):
 
     def _session_for(self, sid: str, email: str) -> dict | None:
         return passkey.session(f"{passkey.COOKIE}={sid}", email)
+
+    def _register_common(self, email: str, sess: dict, data: dict, options: bool) -> None:
+        """共通パスキーの登録（共通アカウントの auth-db に保存してから手元にも保存する）。"""
+        if options:
+            self._json(200, passkey.common_registration_options(email, sess))
+            return
+        cred = passkey.register_common(email, sess, data, self._ip(), self.headers.get("User-Agent", ""))
+        print(f"common passkey registered: {email} ({cred['name']})", flush=True)
+        self._audit("passkey.register_common", email, sess, params={"name": cred["name"]},
+                    message=f"共通パスキー「{cred['name']}」を登録しました")
+        self._json(200, cred)
+
+    def _sso_callback(self, email: str) -> None:
+        """共通認証基盤の SSO から戻ってきたとき。認可コードを auth-db で確かめてセッションを作る。"""
+        code = self._query().get("code")
+        if not code or not authdb.enabled():
+            self._redirect("/login")
+            return
+        code_hash = hashlib.sha256(code.encode()).hexdigest()
+        try:
+            row = authdb.oauth_code(code_hash, SSO_CALLBACK)
+            if row:
+                authdb.consume_oauth_code(code_hash)  # 1 回だけ使えるようにする
+        except authdb.AuthDbError as ex:
+            print(f"sso: {ex}", flush=True)
+            row = None
+        if not authdb.allowed(row):
+            self._audit("sso.login", email, None, ok=False, message="SSO でのログインを拒否しました")
+            self._redirect("/login")
+            return
+        sid = passkey.sso_session(email, row)
+        self._audit("sso.login", email, self._session_for(sid, email),
+                    message=f"SSO でログインしました ({row.get('username')})")
+        self._send(302, b"", "text/plain; charset=utf-8", {"Location": "/", "Set-Cookie": passkey.cookie_for(sid)})
 
     def _tailscale(self, email: str, sess: dict | None, data: dict) -> None:
         print(f"tailscale by {email}: running={data.get('running')}", flush=True)
@@ -593,6 +618,8 @@ def main() -> None:
     print(f"公開 URL: {PUBLIC_URL}/（パスキーの RP ID: {passkey.RP_ID}）", flush=True)
     print(f"Cloudflare Access: {'設定済み' if auth.cloudflare_configured() else '未設定（すべて拒否）'}", flush=True)
     print(f"登録済みパスキー: {len(passkey.credentials())} 件", flush=True)
+    print(f"共通アカウント: {'有効（共通パスキー ' + passkey.COMMON_RP_ID + '）' if passkey.common_enabled() else '未設定'}",
+          flush=True)
     print(f"D1: {'設定済み' if cloud.configured() else '未設定（記録は手元にためておく）'}", flush=True)
     threading.Event().wait()
 

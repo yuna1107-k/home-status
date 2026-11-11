@@ -56,6 +56,7 @@
     background: rgba(255,255,255,.28); box-shadow: inset 0 1px 2px rgba(0,0,0,.12), inset 0 0 0 1px rgba(255,255,255,.3);
   }
   .note { font-size: 12px; color: var(--muted); margin: 14px 0 0; }
+  .lead { font-size: 13px; margin: 0 0 16px; text-align: left; }
   .msg { font-size: 13px; min-height: 1.4em; margin: 12px 0 0; }
   .msg.error { color: var(--danger); }
   a { color: inherit; }
@@ -74,6 +75,13 @@
   <div id="login" hidden>
     <button class="btn" id="btn-login" type="button">パスキーでログイン</button>
     <p class="note">Face ID・Touch ID・Windows Hello・PIN などで本人確認します。</p>
+  </div>
+
+  <div id="migrate" hidden>
+    <p class="lead">全サービス共通のパスキーに切り替えると、1 つのパスキーで共通アカウントのサービスすべてにログインできます。</p>
+    <button class="btn" id="btn-migrate" type="button">共通パスキーを登録する</button>
+    <button class="btn ghost" id="btn-skip" type="button">あとで</button>
+    <p class="note">いまのパスキーもこれまでどおり使えます。</p>
   </div>
 
   <div id="register" hidden>
@@ -127,36 +135,34 @@ function guessName() {
   return "この端末";
 }
 
+function getAssertion(opts) {
+  return navigator.credentials.get({
+    publicKey: {
+      challenge: b64.toBuf(opts.challenge),
+      rpId: opts.rpId,
+      timeout: opts.timeout,
+      userVerification: opts.userVerification,
+      allowCredentials: (opts.allowCredentials || []).map((c) => ({ type: c.type, id: b64.toBuf(c.id) })),
+    },
+  });
+}
+
 async function login() {
   $("btn-login").disabled = true;
   say("本人確認しています…");
   try {
+    // まず共通パスキーを試し、無ければ（キャンセルを含む）このサイトのパスキーに切り替える
+    const opts = await post("/api/passkey/login/options", { common: true });
     let cred;
     try {
-      const opts = await post("/api/passkey/login/options", { common: true });
-      cred = await navigator.credentials.get({
-        publicKey: {
-          challenge: b64.toBuf(opts.challenge),
-          rpId: opts.rpId,
-          timeout: opts.timeout,
-          userVerification: opts.userVerification,
-          allowCredentials: [],
-        },
-      });
-    } catch (e) {
-      if (e.name === "NotAllowedError") throw e;
-      const opts = await post("/api/passkey/login/options", { common: false });
-      cred = await navigator.credentials.get({
-        publicKey: {
-          challenge: b64.toBuf(opts.challenge),
-          rpId: opts.rpId,
-          timeout: opts.timeout,
-          userVerification: opts.userVerification,
-          allowCredentials: (opts.allowCredentials || []).map((c) => ({ type: c.type, id: b64.toBuf(c.id) })),
-        },
-      });
+      cred = await getAssertion(opts);
+    } catch (err) {
+      if (!opts.common) throw err;
+      let local;
+      try { local = await post("/api/passkey/login/options", { common: false }); } catch { throw err; }
+      cred = await getAssertion(local);
     }
-    await post("/api/passkey/login", {
+    const res = await post("/api/passkey/login", {
       id: cred.id,
       response: {
         clientDataJSON: b64.fromBuf(cred.response.clientDataJSON),
@@ -164,11 +170,55 @@ async function login() {
         signature: b64.fromBuf(cred.response.signature),
       },
     });
+    if (res.needs_migration) {
+      say("");
+      $("login").hidden = true;
+      $("register").hidden = true;
+      $("migrate").hidden = false;
+      $("title").textContent = "共通パスキーへの切り替え";
+      return;
+    }
     say("ログインしました");
     location.replace("/");
   } catch (err) {
     say(friendly(err), true);
     $("btn-login").disabled = false;
+  }
+}
+
+async function migrate() {
+  $("btn-migrate").disabled = true;
+  $("btn-skip").disabled = true;
+  say("共通パスキーを作成しています…");
+  try {
+    const opts = await post("/api/passkey/common/register/options");
+    const cred = await navigator.credentials.create({
+      publicKey: {
+        challenge: b64.toBuf(opts.challenge),
+        rp: opts.rp,
+        user: { id: b64.toBuf(opts.user.id), name: opts.user.name, displayName: opts.user.displayName },
+        pubKeyCredParams: opts.pubKeyCredParams,
+        authenticatorSelection: opts.authenticatorSelection,
+        excludeCredentials: opts.excludeCredentials.map((c) => ({ type: c.type, id: b64.toBuf(c.id) })),
+        attestation: opts.attestation,
+        timeout: opts.timeout,
+      },
+    });
+    await post("/api/passkey/common/register", {
+      id: cred.id,
+      name: guessName(),
+      response: {
+        clientDataJSON: b64.fromBuf(cred.response.clientDataJSON),
+        attestationObject: b64.fromBuf(cred.response.attestationObject),
+        transports: typeof cred.response.getTransports === "function" ? cred.response.getTransports() : [],
+      },
+    });
+    say("共通パスキーを登録しました");
+    location.replace("/");
+  } catch (err) {
+    say(friendly(err), true);
+    $("btn-migrate").disabled = false;
+    $("btn-skip").disabled = false;
   }
 }
 
@@ -228,6 +278,8 @@ async function init() {
 
 $("btn-login").addEventListener("click", login);
 $("btn-register").addEventListener("click", register);
+$("btn-migrate").addEventListener("click", migrate);
+$("btn-skip").addEventListener("click", () => location.replace("/"));
 init();
 </script>
 </body>
