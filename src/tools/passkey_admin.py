@@ -6,6 +6,8 @@
   python3 src/tools/passkey_admin.py reset         全部削除（次に開いたとき最初の登録からやり直し）
 
 削除後は `systemctl --user restart home-status` でログイン中のセッションも無効になる。
+ここで消すのは手元の控えだけ。共通アカウントのパスキー（auth-db）を無効にするときは auth で取り消す
+（共通アカウントが有効なら、auth-db に無いパスキーはこのサイトでも使えない）。
 """
 
 import sys
@@ -30,14 +32,14 @@ def main() -> int:
         if len(hits) != 1:
             print("該当するパスキーが 1 つに絞れません" if hits else "該当するパスキーがありません")
             return 1
-        passkey.remove_credential(hits[0]["id"])
+        passkey.remove_credential(hits[0]["id"], local_only=True)
         print(f"削除しました: {hits[0]['name']}")
         return 0
     if cmd == "reset":
         if input(f"{len(creds)} 件のパスキーをすべて削除します。よろしいですか？ [y/N] ").lower() != "y":
             return 1
         for c in creds:
-            passkey.remove_credential(c["id"])
+            passkey.remove_credential(c["id"], local_only=True)
         print("すべて削除しました。systemctl --user restart home-status でセッションも無効にしてください")
         return 0
     print(__doc__)

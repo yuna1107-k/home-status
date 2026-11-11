@@ -17,6 +17,7 @@
   COMMON_PASSKEY_RP_ID  共通パスキーの RP ID（例: example.com。サイトのホスト名の親ドメイン）
   AUTH_SERVICE_ID       共通認証基盤でのこのサイトのサービス ID（既定 status）
   AUTH_SSO_URL          共通認証基盤の URL（SSO ログイン用。例: https://auth.example.com。省略可）
+  AUTH_OWNER_USER_ID    このサイトを使える唯一のユーザー ID（省略可。書くとこの人以外は拒否する）
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ AUTH_DB_ID = cloud._env("AUTH_D1_DATABASE_ID")
 COMMON_RP_ID = cloud._env("COMMON_PASSKEY_RP_ID")
 SERVICE_ID = cloud._env("AUTH_SERVICE_ID") or "status"
 SSO_URL = cloud._env("AUTH_SSO_URL").rstrip("/")
+# このサイトを使える共通アカウントのユーザー ID（1 人で使うサイト用。空なら権限の判定だけ）
+OWNER_USER_ID = cloud._env("AUTH_OWNER_USER_ID")
 
 
 class AuthDbError(Exception):
@@ -55,8 +58,13 @@ _USER_JOIN = "LEFT JOIN user_services us ON us.user_id = u.id AND us.service_id 
 
 
 def allowed(row: dict | None) -> bool:
-    """有効なユーザーで、管理者か、このサイトの利用が許可されていれば True。"""
+    """有効なユーザーで、管理者か、このサイトの利用が許可されていれば True。
+
+    AUTH_OWNER_USER_ID があれば、そのユーザーであることも求める。
+    """
     if not row:
+        return False
+    if OWNER_USER_ID and row.get("user_id") != OWNER_USER_ID:
         return False
     if row.get("user_status") != "active":
         return False
@@ -81,17 +89,6 @@ def credential(cred_id: str) -> dict | None:
 def user(user_id: str) -> dict | None:
     rows = _query(f"SELECT {_USER_COLS} FROM users u {_USER_JOIN} WHERE u.id = ?", [SERVICE_ID, user_id])
     return dict(rows[0]) if rows else None
-
-
-def user_by_email(email: str) -> dict | None:
-    """Cloudflare Access のメールアドレスと同じメールのユーザー（共通アカウントに無い旧パスキー用）。"""
-    if not email:
-        return None
-    rows = _query(
-        f"SELECT {_USER_COLS} FROM users u {_USER_JOIN} WHERE lower(u.email) = lower(?) LIMIT 2",
-        [SERVICE_ID, email],
-    )
-    return dict(rows[0]) if len(rows) == 1 else None
 
 
 def common_credential_ids(user_id: str) -> list[str]:

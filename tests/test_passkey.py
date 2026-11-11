@@ -21,6 +21,8 @@ from cryptography.hazmat.primitives.asymmetric import ec  # noqa: E402
 import authdb  # noqa: E402
 import passkey  # noqa: E402
 
+authdb.OWNER_USER_ID = ""  # .env に設定があってもテストでは使わない
+
 EMAIL = "user@example.com"
 
 
@@ -161,7 +163,6 @@ class FakeAuthDb:
     def __init__(self):
         self.users = {USER_ID: {"user_id": USER_ID, "username": "owner", "display_name": "Owner",
                                 "user_status": "active", "global_role": "admin", "is_enabled": None}}
-        self.emails = {EMAIL: USER_ID}
         self.creds = {}  # id -> {rp_id, user_id, public_key, name}
         self.added = []
         self.audits = []
@@ -181,11 +182,6 @@ class FakeAuthDb:
         self._check()
         u = self.users.get(user_id)
         return dict(u) if u else None
-
-    def user_by_email(self, email):
-        self._check()
-        uid = self.emails.get(email)
-        return self.user(uid) if uid else None
 
     def common_credential_ids(self, user_id):
         self._check()
@@ -216,7 +212,7 @@ class CommonAuthTest(unittest.TestCase):
         passkey._sessions.clear()
         self.db = FakeAuthDb()
         self._saved = {n: getattr(authdb, n) for n in
-                       ("credential", "user", "user_by_email", "common_credential_ids", "add_common_credential",
+                       ("credential", "user", "common_credential_ids", "add_common_credential",
                         "delete_common_credential", "audit")}
         for name in self._saved:
             setattr(authdb, name, getattr(self.db, name))
@@ -232,10 +228,16 @@ class CommonAuthTest(unittest.TestCase):
         self.db.creds[b64(a.cred_id)] = {"rp_id": COMMON, "user_id": USER_ID, "public_key": a.cose(), "name": "共通"}
         return a
 
-    def legacy_auth(self):
+    def legacy_auth(self, in_auth_db=True):
+        """共通アカウント導入前に作ったこのサイトのパスキー（auth-db にも取り込み済み）。"""
         a = Authenticator()
+        passkey.COMMON_RP_ID = ""
         opts = passkey.registration_options(EMAIL)
         passkey.register(EMAIL, a.create(opts["challenge"]))
+        passkey.COMMON_RP_ID = COMMON
+        if in_auth_db:
+            self.db.creds[b64(a.cred_id)] = {"rp_id": passkey.RP_ID, "user_id": USER_ID, "public_key": a.cose(),
+                                             "name": "旧"}
         return a
 
     def login(self, a, common=True, **kw):
@@ -312,25 +314,43 @@ class CommonAuthTest(unittest.TestCase):
 
     def test_legacy_login_via_auth_db_credential(self):
         a = self.legacy_auth()
-        self.db.emails.clear()
-        self.db.creds[b64(a.cred_id)] = {"rp_id": passkey.RP_ID, "user_id": USER_ID, "public_key": a.cose(),
-                                         "name": "旧"}
         sess = self.sess(self.login(a, common=False))
         self.assertEqual(sess["auth_user_id"], USER_ID)
         self.assertTrue(sess["needs_migration"])
 
-    def test_legacy_login_unmapped(self):
-        a = self.legacy_auth()
-        self.db.emails.clear()
+    def test_legacy_not_in_auth_db_rejected(self):
+        a = self.legacy_auth(in_auth_db=False)
         with self.assertRaises(passkey.PasskeyError):
             self.login(a, common=False)
 
-    def test_legacy_mapping_is_pinned_by_id(self):
+    def test_legacy_revoked_in_auth_db(self):
         a = self.legacy_auth()
-        self.login(a, common=False)  # メールで見つけ、ID を覚える
-        self.db.emails.clear()
-        sess = self.sess(self.login(a, common=False))
-        self.assertEqual(sess["auth_user_id"], USER_ID)
+        sid = self.login(a, common=False)
+        del self.db.creds[b64(a.cred_id)]  # auth で取り消した
+        with self.assertRaises(passkey.PasskeyError):
+            self.login(a, common=False)
+        passkey._sessions[sid]["checked_at"] -= passkey.AUTH_RECHECK_SECONDS + 1
+        self.assertIsNone(self.sess(sid))  # 使っていたセッションも終わる
+
+    def test_legacy_rp_mismatch_in_auth_db(self):
+        a = self.legacy_auth()
+        self.db.creds[b64(a.cred_id)]["rp_id"] = COMMON
+        with self.assertRaises(passkey.PasskeyError):
+            self.login(a, common=False)
+
+    def test_owner_only(self):
+        other = "00000000-0000-4000-8000-000000000002"
+        self.db.users[other] = {**self.db.users[USER_ID], "user_id": other, "username": "other"}
+        a = self.common_auth()
+        self.db.creds[b64(a.cred_id)]["user_id"] = other
+        authdb.OWNER_USER_ID = USER_ID
+        try:
+            with self.assertRaises(passkey.PasskeyError):
+                self.login(a)
+            self.db.creds[b64(a.cred_id)]["user_id"] = USER_ID
+            self.login(a)
+        finally:
+            authdb.OWNER_USER_ID = ""
 
     def test_migrate_to_common(self):
         a = self.legacy_auth()
@@ -405,7 +425,7 @@ class CommonAuthTest(unittest.TestCase):
         self.assertEqual(len(passkey.credentials()), 1)
 
     def test_remove_legacy_is_local_only(self):
-        a = self.legacy_auth()
+        a = self.legacy_auth(in_auth_db=False)
         self.assertTrue(passkey.remove_credential(b64(a.cred_id), USER_ID))
         self.assertEqual(self.db.audits, [])
 
@@ -415,6 +435,32 @@ class CommonAuthTest(unittest.TestCase):
         opts = passkey.common_registration_options(EMAIL, sess)
         with self.assertRaises(passkey.PasskeyError):
             passkey.register_common(EMAIL, sess, Authenticator().create(opts["challenge"]))
+
+
+class LinkToolTest(CommonAuthTest):
+    """tools/passkey_link_auth.py: 手元の控えを auth-db に揃える（何度実行しても同じ）。"""
+
+    def test_plan_is_idempotent(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src" / "tools"))
+        import passkey_link_auth as tool
+        keep = self.legacy_auth()
+        gone = self.legacy_auth(in_auth_db=False)
+        other = self.legacy_auth()
+        uid2 = "00000000-0000-4000-8000-000000000002"
+        self.db.users[uid2] = {**self.db.users[USER_ID], "user_id": uid2, "username": "other"}
+        self.db.creds[b64(other.cred_id)]["user_id"] = uid2
+        authdb.OWNER_USER_ID = USER_ID
+        try:
+            data = passkey._load()
+            result, notes = tool.plan(data)
+            ids = [c["id"] for c in result["credentials"]]
+            self.assertEqual(ids, [b64(keep.cred_id)])
+            self.assertNotIn(b64(gone.cred_id), ids)
+            self.assertEqual(result["credentials"][0]["auth_user_id"], USER_ID)
+            self.assertEqual(passkey.unb64url(result["user_id"]).decode(), USER_ID)
+            self.assertEqual(tool.plan(result), (result, []))
+        finally:
+            authdb.OWNER_USER_ID = ""
 
 
 class AuthDbSqlTest(unittest.TestCase):

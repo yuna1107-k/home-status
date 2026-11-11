@@ -391,16 +391,6 @@ def login_options(email: str, common: bool = True) -> dict:
     }
 
 
-def _resolve_auth_user(cred: dict, email: str) -> dict | None:
-    """このサイトのパスキーの持ち主を共通アカウントから探す（ID → パスキー → メールの順）。"""
-    if cred.get("auth_user_id"):
-        return authdb.user(cred["auth_user_id"])
-    row = authdb.credential(cred["id"])
-    if row:
-        return row
-    return authdb.user_by_email(email)
-
-
 def login(email: str, body: dict) -> str:
     """検証に成功したらセッション ID を返す。"""
     try:
@@ -415,14 +405,15 @@ def login(email: str, body: dict) -> str:
     common = bool(COMMON_RP_ID) and rp_id == COMMON_RP_ID
 
     remote = None
-    if common:
-        # 共通パスキーは共通アカウントが正本。消されていたら使えない
+    if common_enabled():
+        # パスキーは共通アカウント（auth-db）が正本。共通・このサイトのどちらも、auth-db に無ければ使えない
         try:
             remote = authdb.credential(cred_id)
         except authdb.AuthDbError as ex:
             raise PasskeyError(str(ex)) from None
-        if remote is None or remote.get("rp_id") != COMMON_RP_ID:
-            raise PasskeyError("登録されていないパスキーです")
+        if remote is None or remote.get("rp_id") != rp_id:
+            raise PasskeyError("登録されていないパスキーです（共通アカウントで無効になっています）")
+    if common:
         try:
             remote_pem, remote_alg = _cose_to_pem(_cbor(remote["public_key"])[0])
         except (PasskeyError, IndexError, KeyError, TypeError, ValueError):
@@ -454,41 +445,38 @@ def login(email: str, body: dict) -> str:
         _save(data)
         cred = dict(cred)
 
-    # 共通アカウントで、このサイトの利用が許可されているか
+    # 持ち主はパスキーの user_id（auth-db）で決める。このサイトの利用が許可されているか
     auth_user_id = None
     needs_migration = False
     if common_enabled():
-        try:
-            row = remote if common else _resolve_auth_user(cred, email)
-            if row and not common and not authdb.common_credential_ids(row["user_id"]):
-                needs_migration = True
-        except authdb.AuthDbError as ex:
-            raise PasskeyError(str(ex)) from None
-        if row is None:
-            raise PasskeyError("このパスキーは共通アカウントに紐付いていません")
-        if not authdb.allowed(row):
+        if not authdb.allowed(remote):
             raise PasskeyError("共通アカウントでこのサイトの利用が許可されていません")
-        auth_user_id = row["user_id"]
+        auth_user_id = remote["user_id"]
+        if not common:
+            try:
+                needs_migration = not authdb.common_credential_ids(auth_user_id)
+            except authdb.AuthDbError:
+                needs_migration = False  # 勧めるかどうかだけなので、確かめられなければ勧めない
 
     with _lock:
         if auth_user_id and not common:
-            # 一度見つけた持ち主は ID で覚えておく（以降はメールが変わっても同じ人として扱う）
             data = _load()
             for c in data["credentials"]:
                 if c["id"] == cred_id and c.get("auth_user_id") != auth_user_id:
-                    c["auth_user_id"] = auth_user_id
+                    c["auth_user_id"] = auth_user_id  # 表示・削除用の控え（判定には使わない）
                     _save(data)
-        return _new_session(email, cred["name"], auth_user_id, needs_migration)
+        return _new_session(email, cred["name"], auth_user_id, needs_migration, cred_id)
 
 
-def _new_session(email: str, credential: str, auth_user_id: str | None, needs_migration: bool = False) -> str:
+def _new_session(email: str, credential: str, auth_user_id: str | None, needs_migration: bool = False,
+                 cred_id: str | None = None) -> str:
     """セッションを作る（_lock を持った状態で呼ぶ）。"""
     now = time.time()
     for sid in [s for s, v in _sessions.items() if v["expires"] < now]:
         del _sessions[sid]
     sid = secrets.token_urlsafe(32)
     _sessions[sid] = {"email": email, "credential": credential, "expires": now + SESSION_SECONDS,
-                      "auth_user_id": auth_user_id, "checked_at": now, "ok_at": now,
+                      "auth_user_id": auth_user_id, "cred_id": cred_id, "checked_at": now, "ok_at": now,
                       "needs_migration": needs_migration}
     return sid
 
@@ -513,7 +501,12 @@ def _still_allowed(sid: str, sess: dict) -> bool:
             return True
         live["checked_at"] = now  # 同時に来たリクエストで何度も問い合わせない
     try:
-        ok = authdb.allowed(authdb.user(user_id))
+        if sess.get("cred_id"):
+            # パスキーでのログインは、そのパスキーが auth-db に残っていることも確かめる
+            row = authdb.credential(sess["cred_id"])
+            ok = bool(row) and row.get("user_id") == user_id and authdb.allowed(row)
+        else:
+            ok = authdb.allowed(authdb.user(user_id))
     except authdb.AuthDbError as ex:
         # 一時的につながらないだけなら、しばらくは前回の結果を使う
         print(f"passkey: {ex}", flush=True)
@@ -562,16 +555,18 @@ def clear_cookie() -> str:
     return f"{COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict"
 
 
-def remove_credential(cred_id: str, auth_user_id: str | None = None, ip: str = "", user_agent: str = "") -> bool:
+def remove_credential(cred_id: str, auth_user_id: str | None = None, ip: str = "", user_agent: str = "",
+                      local_only: bool = False) -> bool:
     """パスキーを消す。共通パスキーは共通アカウント（auth-db）からも消す（すべてのサービスで使えなくなる）。
 
     auth_user_id を渡すと、その人の共通パスキーだけを消せる（ログイン中の人が他人の分を消さないように）。
+    local_only=True なら手元の控えだけ消す（Pi の管理ツール用。共通パスキーの取り消しは auth で行う）。
     """
     with _lock:
         cred = next((c for c in _load()["credentials"] if c["id"] == cred_id), None)
     if cred is None:
         return False
-    if COMMON_RP_ID and cred.get("rp_id") == COMMON_RP_ID:
+    if COMMON_RP_ID and cred.get("rp_id") == COMMON_RP_ID and not local_only:
         owner = cred.get("auth_user_id")
         if not owner or (auth_user_id and owner != auth_user_id):
             raise PasskeyError("このパスキーは削除できません（共通アカウントの持ち主が違います）")
