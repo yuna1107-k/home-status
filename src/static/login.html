@@ -72,7 +72,11 @@
   <p class="email" id="email">確認中…</p>
 
   <div id="login" hidden>
-    <button class="btn" id="btn-login" type="button">パスキーでログイン</button>
+    <div style="display:flex; flex-direction:column; gap:10px;">
+      <button class="btn" id="btn-login" type="button">パスキーでログイン</button>
+      <button class="btn ghost" id="btn-sso" type="button" style="background:#2563eb; color:#fff; margin-top:0;">auth.yuna1107.com でログイン</button>
+      <button type="button" id="btn-local-login" style="background:none; border:none; color:var(--muted); font-size:12px; cursor:pointer; text-decoration:underline;">個別パスキー（旧 status.yuna1107.com）でログイン</button>
+    </div>
     <p class="note">Face ID・Touch ID・Windows Hello・PIN などで本人確認します。</p>
   </div>
 
@@ -127,18 +131,18 @@ function guessName() {
   return "この端末";
 }
 
-async function login() {
+async function login(common = true) {
   $("btn-login").disabled = true;
   say("本人確認しています…");
   try {
-    const opts = await post("/api/passkey/login/options");
+    const opts = await post("/api/passkey/login/options", { common });
     const cred = await navigator.credentials.get({
       publicKey: {
         challenge: b64.toBuf(opts.challenge),
         rpId: opts.rpId,
         timeout: opts.timeout,
         userVerification: opts.userVerification,
-        allowCredentials: opts.allowCredentials.map((c) => ({ type: c.type, id: b64.toBuf(c.id) })),
+        allowCredentials: (opts.allowCredentials || []).map((c) => ({ type: c.type, id: b64.toBuf(c.id) })),
       },
     });
     await post("/api/passkey/login", {
@@ -211,7 +215,9 @@ async function init() {
   }
 }
 
-$("btn-login").addEventListener("click", login);
+$("btn-login").addEventListener("click", () => login(true));
+$("btn-local-login").addEventListener("click", () => login(false));
+$("btn-sso").addEventListener("click", () => { location.href = "/auth/sso/login"; });
 $("btn-register").addEventListener("click", register);
 init();
 </script>
