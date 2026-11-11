@@ -982,11 +982,6 @@ async function loadAccount() {
   let list = [];
   try { list = (await (await fetch("/api/passkeys", { cache: "no-store" })).json()).passkeys || []; } catch { /* 一覧が出せなくても他は使える */ }
 
-  const authUrl = state.who.auth_url || (state.who.common ? "https://auth.example.com" : "");
-  let authHost = "auth.example.com";
-  try { if (authUrl) authHost = new URL(authUrl).host; } catch {}
-  const userHref = (authUrl && state.who.user_id) ? `${authUrl}/users/${encodeURIComponent(state.who.user_id)}` : authUrl;
-  const authLink = authUrl ? `<a class="btn small" href="${esc(userHref)}" target="_blank" rel="noopener">${icon("external")}共通アカウントの管理（${esc(authHost)}）</a>` : "";
 
   const name = state.who.display_name || state.who.username || state.who.who || "アカウント";
   const avatarHtml = state.who.avatar_url
@@ -1001,7 +996,6 @@ async function loadAccount() {
         <div class="account-email sub">${esc(state.who.who || "")}</div>
       </div>
     </div>
-    ${authLink ? `<div class="account-actions">${authLink}</div>` : ""}
   </div>`;
 
   box.innerHTML = `${profileHtml}<div class="list-rows">${list.map((c) => `<div class="list-row"><div class="grow"><div>${esc(c.name)}${c.common ? ' <span class="tag">共通</span>' : ""}${c.name === state.who.credential ? ' <span class="tag ok">使用中</span>' : ""}</div>
