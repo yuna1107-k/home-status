@@ -8,8 +8,9 @@
 使うもの:
   - パスキー（credentials）: 共通パスキー（COMMON_PASSKEY_RP_ID）の公開鍵と、持ち主の user_id
   - ユーザー（users）と サービス権限（user_services）: ログインしてよいかの判定
-書き込むのは、共通パスキーへの切り替えで作ったパスキーを credentials に足すときだけ。
-ユーザーは作らない。
+書き込むのは、このサイトで作った共通パスキーを credentials に足す・消すとき（と、その
+監査ログ）と、SSO の認可コードを使い切るときだけ。ユーザーは作らない（このサイトにはアカウントを
+作る機能が無い。利用者は Cloudflare Access とパスキーで決まる 1 人だけ）。
 
 設定（.env）。AUTH_D1_DATABASE_ID と COMMON_PASSKEY_RP_ID の両方があるときだけ有効:
   AUTH_D1_DATABASE_ID   共通認証基盤の D1 データベースの ID
@@ -130,4 +131,19 @@ def add_common_credential(*, cred_id: str, user_id: str, cose: bytes, counter: i
             str(uuid.UUID(bytes=bytes(aaguid))) if len(aaguid) == 16 else None,
             name, COMMON_RP_ID, int(time.time() * 1000),
         ],
+    )
+
+
+def delete_common_credential(cred_id: str, user_id: str) -> None:
+    """共通パスキーを共通認証基盤から消す（持ち主と RP ID が一致するものだけ）。"""
+    _query("DELETE FROM credentials WHERE id = ? AND user_id = ? AND rp_id = ?", [cred_id, user_id, COMMON_RP_ID])
+
+
+def audit(action: str, user_id: str, details: dict, ip: str = "", user_agent: str = "") -> None:
+    """共通認証基盤の監査ログ（audit_logs）に 1 行書く。"""
+    _query(
+        """INSERT INTO audit_logs (id, timestamp, actor_id, target_user_id, service_id, action, details, ip, user_agent)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        [str(uuid.uuid4()), int(time.time() * 1000), user_id, user_id, SERVICE_ID, action,
+         json.dumps(details, ensure_ascii=False, separators=(",", ":")), ip or None, (user_agent or "")[:300] or None],
     )

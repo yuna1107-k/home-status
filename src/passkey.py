@@ -313,7 +313,7 @@ def common_registration_options(email: str, sess: dict) -> dict:
     }
 
 
-def register_common(email: str, sess: dict, body: dict) -> dict:
+def register_common(email: str, sess: dict, body: dict, ip: str = "", user_agent: str = "") -> dict:
     """共通パスキーを検証し、共通アカウント（auth-db）と手元の両方に保存する。"""
     if not common_enabled():
         raise PasskeyError("共通アカウントが設定されていません")
@@ -347,6 +347,10 @@ def register_common(email: str, sess: dict, body: dict) -> dict:
         )
     except authdb.AuthDbError as ex:
         raise PasskeyError(f"共通アカウントに保存できませんでした: {ex}") from None
+    try:
+        authdb.audit("passkey.register", user_id, {"via": "status"}, ip, user_agent)
+    except authdb.AuthDbError as ex:  # 監査ログが書けなくても登録は済んでいる
+        print(f"passkey: 共通アカウントの監査ログを書けませんでした: {ex}", flush=True)
     with _lock:
         data = _load()
         data["credentials"].append({
@@ -558,14 +562,34 @@ def clear_cookie() -> str:
     return f"{COOKIE}=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Strict"
 
 
-def remove_credential(cred_id: str) -> bool:
+def remove_credential(cred_id: str, auth_user_id: str | None = None, ip: str = "", user_agent: str = "") -> bool:
+    """パスキーを消す。共通パスキーは共通アカウント（auth-db）からも消す（すべてのサービスで使えなくなる）。
+
+    auth_user_id を渡すと、その人の共通パスキーだけを消せる（ログイン中の人が他人の分を消さないように）。
+    """
+    with _lock:
+        cred = next((c for c in _load()["credentials"] if c["id"] == cred_id), None)
+    if cred is None:
+        return False
+    if COMMON_RP_ID and cred.get("rp_id") == COMMON_RP_ID:
+        owner = cred.get("auth_user_id")
+        if not owner or (auth_user_id and owner != auth_user_id):
+            raise PasskeyError("このパスキーは削除できません（共通アカウントの持ち主が違います）")
+        try:
+            authdb.delete_common_credential(cred_id, owner)
+        except authdb.AuthDbError as ex:
+            raise PasskeyError(f"共通アカウントから削除できませんでした: {ex}") from None
+        try:
+            authdb.audit("passkey.delete", owner, {"via": "status", "credId": cred_id}, ip, user_agent)
+        except authdb.AuthDbError as ex:
+            print(f"passkey: 共通アカウントの監査ログを書けませんでした: {ex}", flush=True)
     with _lock:
         data = _load()
         before = len(data["credentials"])
         data["credentials"] = [c for c in data["credentials"] if c["id"] != cred_id]
         if len(data["credentials"]) == before:
             return False
-        if not data["credentials"]:
+        if not data["credentials"] and not COMMON_RP_ID:
             # 最後の 1 つを消したら全セッションも無効にする（次は最初の登録からやり直し）
             _sessions.clear()
         _save(data)

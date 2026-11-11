@@ -164,7 +164,9 @@ class FakeAuthDb:
         self.emails = {EMAIL: USER_ID}
         self.creds = {}  # id -> {rp_id, user_id, public_key, name}
         self.added = []
+        self.audits = []
         self.down = False
+        self.audit_down = False
 
     def _check(self):
         if self.down:
@@ -195,6 +197,18 @@ class FakeAuthDb:
         self.creds[kw["cred_id"]] = {"rp_id": COMMON, "user_id": kw["user_id"], "public_key": kw["cose"],
                                      "name": kw["name"]}
 
+    def delete_common_credential(self, cred_id, user_id):
+        self._check()
+        c = self.creds.get(cred_id)
+        if c and c["user_id"] == user_id and c["rp_id"] == COMMON:
+            del self.creds[cred_id]
+
+    def audit(self, action, user_id, details, ip="", user_agent=""):
+        self._check()
+        if self.audit_down:
+            raise authdb.AuthDbError("audit down")
+        self.audits.append((action, user_id, details))
+
 
 class CommonAuthTest(unittest.TestCase):
     def setUp(self):
@@ -202,7 +216,8 @@ class CommonAuthTest(unittest.TestCase):
         passkey._sessions.clear()
         self.db = FakeAuthDb()
         self._saved = {n: getattr(authdb, n) for n in
-                       ("credential", "user", "user_by_email", "common_credential_ids", "add_common_credential")}
+                       ("credential", "user", "user_by_email", "common_credential_ids", "add_common_credential",
+                        "delete_common_credential", "audit")}
         for name in self._saved:
             setattr(authdb, name, getattr(self.db, name))
         passkey.COMMON_RP_ID = COMMON
@@ -335,6 +350,7 @@ class CommonAuthTest(unittest.TestCase):
         self.assertEqual((added["user_id"], added["transports"]), (USER_ID, ["internal", "hybrid"]))
         self.assertFalse(self.sess(sid)["needs_migration"])
         self.assertEqual(sum(c["common"] for c in passkey.credentials()), 1)
+        self.assertEqual(self.db.audits, [("passkey.register", USER_ID, {"via": "status"})])
         # 作った共通パスキーでログインできる
         self.assertEqual(self.sess(self.login(new))["auth_user_id"], USER_ID)
 
@@ -346,6 +362,52 @@ class CommonAuthTest(unittest.TestCase):
         with self.assertRaises(passkey.PasskeyError):
             passkey.register_common(EMAIL, sess, Authenticator().create(opts["challenge"], rp_id=COMMON))
         self.assertEqual(len(passkey.credentials()), 1)
+
+    def test_audit_failure_does_not_undo_registration(self):
+        sess = self.sess(self.login(self.legacy_auth(), common=False))
+        opts = passkey.common_registration_options(EMAIL, sess)
+        self.db.audit_down = True
+        passkey.register_common(EMAIL, sess, Authenticator().create(opts["challenge"], rp_id=COMMON))
+        self.assertEqual(len(self.db.added), 1)
+        self.assertEqual(sum(c["common"] for c in passkey.credentials()), 1)
+
+    def test_registration_options_exclude_existing_common(self):
+        a = self.common_auth()
+        sess = self.sess(self.login(a))
+        opts = passkey.common_registration_options(EMAIL, sess)
+        self.assertEqual([c["id"] for c in opts["excludeCredentials"]], [b64(a.cred_id)])
+        sel = opts["authenticatorSelection"]
+        self.assertEqual((sel["residentKey"], sel["userVerification"]), ("required", "required"))
+
+    def test_remove_common_deletes_from_auth_db(self):
+        a = self.common_auth()
+        sid = self.login(a)
+        cid = b64(a.cred_id)
+        self.assertTrue(passkey.remove_credential(cid, USER_ID))
+        self.assertNotIn(cid, self.db.creds)
+        self.assertEqual(self.db.audits[-1][0], "passkey.delete")
+        self.assertEqual(passkey.credentials(), [])
+        self.assertIsNotNone(self.sess(sid))  # 共通アカウントがあればセッションは残す
+
+    def test_remove_common_other_owner_rejected(self):
+        a = self.common_auth()
+        self.login(a)
+        with self.assertRaises(passkey.PasskeyError):
+            passkey.remove_credential(b64(a.cred_id), "someone-else")
+        self.assertIn(b64(a.cred_id), self.db.creds)
+
+    def test_remove_common_kept_when_auth_db_fails(self):
+        a = self.common_auth()
+        self.login(a)
+        self.db.down = True
+        with self.assertRaises(passkey.PasskeyError):
+            passkey.remove_credential(b64(a.cred_id), USER_ID)
+        self.assertEqual(len(passkey.credentials()), 1)
+
+    def test_remove_legacy_is_local_only(self):
+        a = self.legacy_auth()
+        self.assertTrue(passkey.remove_credential(b64(a.cred_id), USER_ID))
+        self.assertEqual(self.db.audits, [])
 
     def test_migrate_rejects_wrong_rp(self):
         a = self.legacy_auth()
@@ -387,6 +449,16 @@ class AuthDbSqlTest(unittest.TestCase):
         self.rows = [{"id": "abc", "rp_id": COMMON, "name": "x", "public_key_hex": cose.hex().upper(),
                       "user_id": USER_ID, "user_status": "active", "global_role": "admin", "is_enabled": None}]
         self.assertEqual(authdb.credential("abc")["public_key"], cose)
+
+    def test_delete_and_audit_sql(self):
+        authdb.delete_common_credential("abc", USER_ID)
+        sql, params, _ = self.calls[-1]
+        self.assertIn("DELETE FROM credentials", sql)
+        self.assertEqual(params, ["abc", USER_ID, authdb.COMMON_RP_ID])
+        authdb.audit("passkey.register", USER_ID, {"via": "status"}, "1.2.3.4", "UA")
+        sql, params, _ = self.calls[-1]
+        self.assertIn("INSERT INTO audit_logs", sql)
+        self.assertEqual(params[2:7], [USER_ID, USER_ID, authdb.SERVICE_ID, "passkey.register", '{"via":"status"}'])
 
     def test_allowed(self):
         self.assertFalse(authdb.allowed(None))

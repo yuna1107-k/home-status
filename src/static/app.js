@@ -983,12 +983,16 @@ async function loadAccount() {
   try { list = (await (await fetch("/api/passkeys", { cache: "no-store" })).json()).passkeys || []; } catch { /* 一覧が出せなくても他は使える */ }
   box.innerHTML = `<div class="list-rows">${list.map((c) => `<div class="list-row"><div class="grow"><div>${esc(c.name)}${c.common ? ' <span class="tag">共通</span>' : ""}${c.name === state.who.credential ? ' <span class="tag ok">使用中</span>' : ""}</div>
       <div class="sub">登録 ${esc(c.created_at)} · 最終使用 ${esc(c.last_used_at || "-")}</div></div>
-      ${c.common ? '<span class="muted" style="font-size:.78rem">共通アカウントで管理</span>' : `<button class="btn small danger" type="button" data-pk="${esc(c.id)}">削除</button>`}</div>`).join("")}</div>
+      ${c.common ? '<div class="sub">全サービス共通のパスキーです</div>' : ""}</div>
+      <button class="btn small danger" type="button" data-pk="${esc(c.id)}" data-common="${c.common ? 1 : ""}">削除</button></div>`).join("")}</div>
     <div class="form" style="margin-top:14px"><div class="field"><span class="lbl">この端末の名前</span><input type="text" id="pk-name" maxlength="40" value="${esc(deviceName())}"></div>
     <div class="form-actions"><button class="btn small danger" type="button" id="pk-logout">ログアウト</button><button class="btn small primary" type="button" id="pk-add">${icon("plus")}この端末のパスキーを追加</button></div>
-    <p class="note">パスキーを同期していない端末を追加するときは、その端末でログイン画面を開き、「パスキーでログイン」→ 別の端末（パスキーがある端末）で QR コードを読み取ってログインしてから、ここで追加します。すべて削除すると、次に開いたときに最初の登録からやり直しになります。</p></div>`;
+    <p class="note">パスキーを同期していない端末を追加するときは、その端末でログイン画面を開き、「パスキーでログイン」→ 別の端末（パスキーがある端末）で QR コードを読み取ってログインしてから、ここで追加します。${state.who.common ? "ここで追加するパスキーは全サービス共通のパスキーになります。" : "すべて削除すると、次に開いたときに最初の登録からやり直しになります。"}</p></div>`;
   box.querySelectorAll("[data-pk]").forEach((b) => b.addEventListener("click", async () => {
-    if (!(await confirmDialog({ title: "このパスキーを削除しますか？", message: "削除した端末ではログインできなくなります。", ok: "削除", danger: true }))) return;
+    const message = b.dataset.common
+      ? "全サービス共通のパスキーです。共通アカウントからも削除され、すべてのサービスでこのパスキーを使えなくなります。"
+      : "削除した端末ではログインできなくなります。";
+    if (!(await confirmDialog({ title: "このパスキーを削除しますか？", message, ok: "削除", danger: true }))) return;
     try { toast((await post("/api/passkey/remove", { id: b.dataset.pk })).message); } catch (err) { toast(err.message, true); }
     loadAccount();
   }));
@@ -1005,7 +1009,8 @@ async function loadAccount() {
         attestation: o.attestation, timeout: o.timeout,
       } });
       await post("/api/passkey/register", { id: cred.id, name, response: {
-        clientDataJSON: b64.fromBuf(cred.response.clientDataJSON), attestationObject: b64.fromBuf(cred.response.attestationObject) } });
+        clientDataJSON: b64.fromBuf(cred.response.clientDataJSON), attestationObject: b64.fromBuf(cred.response.attestationObject),
+        transports: typeof cred.response.getTransports === "function" ? cred.response.getTransports() : [] } });
       toast(`パスキー「${name}」を追加しました`);
       loadAccount();
     } catch (err) {

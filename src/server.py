@@ -323,7 +323,7 @@ class AppHandler(BaseHandler):
             self._file("index.html" if running else "tunnel.html", "text/html; charset=utf-8")
         elif path == "/api/whoami":
             self._json(200, {"can_edit": running, "who": email, "credential": sess["credential"],
-                             "role": self.role, "tailscale_running": running,
+                             "role": self.role, "tailscale_running": running, "common": passkey.common_enabled(),
                              "reason": "" if running else "Pi の Tailscale がオフのため、ボードは使えません"})
         elif path == "/api/tailscale":
             self._json(200, {"authorized": True, "who": email, **actions.tailscale_state()})
@@ -404,7 +404,10 @@ class AppHandler(BaseHandler):
                 if (passkey.has_credentials() or passkey.common_enabled()) and not sess:
                     self._json(403, {"error": "パスキーを追加するには、登録済みのパスキーでログインしてください"})
                     return
-                if path.endswith("/options"):
+                if passkey.common_enabled():
+                    # 共通アカウントが有効なら、このサイトで作るパスキーはすべて共通パスキー
+                    self._register_common(email, sess, data, path.endswith("/options"))
+                elif path.endswith("/options"):
                     self._json(200, passkey.registration_options(email))
                 else:
                     cred = passkey.register(email, data)
@@ -424,19 +427,13 @@ class AppHandler(BaseHandler):
             if not sess:
                 self._json(401, {"error": "パスキーでログインしてください", "login": "/login"})
                 return
-            if path == "/api/passkey/common/register/options":
-                self._json(200, passkey.common_registration_options(email, sess))
-                return
-            if path == "/api/passkey/common/register":
-                cred = passkey.register_common(email, sess, data)
-                print(f"common passkey registered: {email} ({cred['name']})", flush=True)
-                self._audit("passkey.register_common", email, sess, params={"name": cred["name"]},
-                            message=f"共通パスキー「{cred['name']}」を登録しました")
-                self._json(200, cred)
+            if path in ("/api/passkey/common/register/options", "/api/passkey/common/register"):
+                self._register_common(email, sess, data, path.endswith("/options"))
                 return
             if path == "/api/passkey/remove":
                 cred_id = str(data.get("id", ""))
-                if not passkey.remove_credential(cred_id):
+                if not passkey.remove_credential(cred_id, sess.get("auth_user_id"), self._ip(),
+                                                 self.headers.get("User-Agent", "")):
                     self._json(404, {"error": "そのパスキーは見つかりません"})
                     return
                 print(f"passkey removed by {email}: {cred_id[:12]}…", flush=True)
@@ -480,6 +477,17 @@ class AppHandler(BaseHandler):
 
     def _session_for(self, sid: str, email: str) -> dict | None:
         return passkey.session(f"{passkey.COOKIE}={sid}", email)
+
+    def _register_common(self, email: str, sess: dict, data: dict, options: bool) -> None:
+        """共通パスキーの登録（共通アカウントの auth-db に保存してから手元にも保存する）。"""
+        if options:
+            self._json(200, passkey.common_registration_options(email, sess))
+            return
+        cred = passkey.register_common(email, sess, data, self._ip(), self.headers.get("User-Agent", ""))
+        print(f"common passkey registered: {email} ({cred['name']})", flush=True)
+        self._audit("passkey.register_common", email, sess, params={"name": cred["name"]},
+                    message=f"共通パスキー「{cred['name']}」を登録しました")
+        self._json(200, cred)
 
     def _sso_callback(self, email: str) -> None:
         """共通認証基盤の SSO から戻ってきたとき。認可コードを auth-db で確かめてセッションを作る。"""
