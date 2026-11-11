@@ -55,6 +55,8 @@ def _defaults() -> dict:
         "rules": {rid: {"enabled": r[3], "threshold": r[2]} for rid, r in RULES.items()},
         # 監視するサービス（collectors.SERVICES の id）
         "watch_services": ["cloudflared", "tailscaled", "docker", "nextcloud"],
+        # Tailscale Serve で公開を許可するローカルポート（8080: Nextcloud, 8092: このサイトの転送用）
+        "allowed_serve_ports": [8080, 8092],
     }
 
 
@@ -152,6 +154,11 @@ def update(changes: object) -> dict:
                 if not 1 <= th <= 1000:
                     raise ValueError(f"{RULES[rid][0]} のしきい値が範囲外です")
                 cur["rules"][rid]["threshold"] = th
+    if "allowed_serve_ports" in changes:
+        ports = changes["allowed_serve_ports"]
+        if not isinstance(ports, list) or not all(isinstance(p, int) and 1 <= p <= 65535 for p in ports):
+            raise ValueError("公開許可ポートの指定が不正です")
+        cur["allowed_serve_ports"] = sorted(set(ports))
     with _lock:
         _cache = cur
         _write(cur)

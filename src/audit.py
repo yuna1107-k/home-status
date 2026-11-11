@@ -20,7 +20,8 @@ _lock = threading.Lock()
 # 記録に残さない（ログの閲覧など、状態を変えない）操作
 READ_ONLY = {"logs.view"}
 # パラメータのうち記録しないもの
-SECRET_KEYS = {"response", "clientDataJSON", "attestationObject", "signature", "authenticatorData"}
+SECRET_KEYS = {"response", "clientDataJSON", "attestationObject", "signature", "authenticatorData",
+               "token", "topic", "password", "otp", "code", "credential", "key_a", "key_b", "paste", "webhook_url"}
 
 
 def _clean(params: object) -> object:

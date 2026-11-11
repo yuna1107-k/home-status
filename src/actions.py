@@ -14,6 +14,7 @@ import subprocess
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
+import settings
 import versions
 from sampler import NET_IFACE, NEXTCLOUD_COMPOSE_PROJECT
 
@@ -133,6 +134,10 @@ def tailscale_serve_add(params: dict) -> str:
     target = _port(params.get("target"), "転送先ポート")
     if https_port == STATUS_HTTPS_PORT:
         raise ActionError(f"{STATUS_HTTPS_PORT} はこのサイト用なので変更できません")
+    allowed = set(settings.get().get("allowed_serve_ports", [8080, 8092]))
+    if target not in allowed:
+        allowed_str = ", ".join(str(p) for p in sorted(allowed))
+        raise ActionError(f"転送先ポート {target} は公開が許可されていません（許可: {allowed_str}）")
     _run("tailscale", "serve", "--bg", f"--https={https_port}", f"http://127.0.0.1:{target}")
     return f"https の {https_port} 番を 127.0.0.1:{target} に転送するようにしました"
 
