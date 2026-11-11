@@ -116,8 +116,6 @@ def configured() -> bool:
     return _config() is not None
 
 
-AUTH_DB_ID = "eb502fa2-ed0f-4a62-8ab9-942ec5de6081"
-
 def _request(body: dict, timeout: float = 20, database: str | None = None) -> list[dict]:
     cfg = _config()
     if cfg is None:
@@ -149,15 +147,12 @@ def _request(body: dict, timeout: float = 20, database: str | None = None) -> li
     return data.get("result") or []
 
 
-def query(sql: str, params: list | tuple = (), timeout: float = 15) -> list[dict]:
-    """1 文を実行して行の一覧を返す（読み取り用。失敗すると CloudError）。"""
-    result = _request({"sql": sql, "params": list(params)}, timeout=timeout)
-    return (result[0].get("results") if result else []) or []
+def query(sql: str, params: list | tuple = (), timeout: float = 15, database: str | None = None) -> list[dict]:
+    """1 文をすぐに実行して行の一覧を返す（失敗すると CloudError）。
 
-
-def query_auth_db(sql: str, params: list | tuple = (), timeout: float = 15) -> list[dict]:
-    """auth-db (統合認証DB) に対してクエリを実行して行の一覧を返す。"""
-    result = _request({"sql": sql, "params": list(params)}, timeout=timeout, database=AUTH_DB_ID)
+    database を渡すと、同じアカウントの別の D1（共通認証の auth-db など）に対して実行する。
+    """
+    result = _request({"sql": sql, "params": list(params)}, timeout=timeout, database=database)
     return (result[0].get("results") if result else []) or []
 
 
