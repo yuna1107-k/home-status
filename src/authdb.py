@@ -52,7 +52,7 @@ def _query(sql: str, params: list) -> list[dict]:
 
 
 # 利用者とこのサイトの権限をまとめて引く列
-_USER_COLS = """u.id AS user_id, u.username, u.display_name, u.status AS user_status,
+_USER_COLS = """u.id AS user_id, u.username, u.display_name, u.avatar_url, u.status AS user_status,
                 u.global_role, us.is_enabled"""
 _USER_JOIN = "LEFT JOIN user_services us ON us.user_id = u.id AND us.service_id = ?"
 

@@ -273,6 +273,17 @@ class AppHandler(BaseHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         path = self.path.split("?", 1)[0]
+        if path == "/.well-known/webauthn":
+            auth_origin = authdb.SSO_URL or (f"https://auth.{passkey.COMMON_RP_ID}" if passkey.COMMON_RP_ID else "https://auth.example.com")
+            origins = [auth_origin, PUBLIC_URL]
+            seen = set()
+            unique_origins = []
+            for o in origins:
+                if o and o not in seen:
+                    seen.add(o)
+                    unique_origins.append(o)
+            self._json(200, {"origins": unique_origins})
+            return
         if path in ASSETS:
             self._file(*ASSETS[path])
             return
@@ -322,8 +333,14 @@ class AppHandler(BaseHandler):
         if path in ("/", "/index.html"):
             self._file("index.html" if running else "tunnel.html", "text/html; charset=utf-8")
         elif path == "/api/whoami":
+            auth_url = authdb.SSO_URL or (f"https://auth.{passkey.COMMON_RP_ID}" if passkey.COMMON_RP_ID else "")
             self._json(200, {"can_edit": running, "who": email, "credential": sess["credential"],
                              "role": self.role, "tailscale_running": running, "common": passkey.common_enabled(),
+                             "user_id": sess.get("auth_user_id"),
+                             "display_name": sess.get("display_name"),
+                             "username": sess.get("username"),
+                             "avatar_url": sess.get("avatar_url"),
+                             "auth_url": auth_url,
                              "reason": "" if running else "Pi の Tailscale がオフのため、ボードは使えません"})
         elif path == "/api/tailscale":
             self._json(200, {"authorized": True, "who": email, **actions.tailscale_state()})
@@ -432,6 +449,21 @@ class AppHandler(BaseHandler):
                 return
             if path == "/api/passkey/remove":
                 cred_id = str(data.get("id", ""))
+                user_id = sess.get("auth_user_id")
+                # 最後の 1 本は消せない
+                if passkey.common_enabled() and user_id:
+                    try:
+                        common_ids = authdb.common_credential_ids(user_id)
+                        if len(common_ids) <= 1 and cred_id in common_ids:
+                            self._json(400, {"error": "最後の共通パスキーは削除できません"})
+                            return
+                    except authdb.AuthDbError:
+                        pass
+                else:
+                    creds = [c for c in passkey.credentials() if not c.get("common")]
+                    if len(creds) <= 1:
+                        self._json(400, {"error": "最後のパスキーは削除できません"})
+                        return
                 if not passkey.remove_credential(cred_id, sess.get("auth_user_id"), self._ip(),
                                                  self.headers.get("User-Agent", "")):
                     self._json(404, {"error": "そのパスキーは見つかりません"})

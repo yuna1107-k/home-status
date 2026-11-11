@@ -465,11 +465,17 @@ def login(email: str, body: dict) -> str:
                 if c["id"] == cred_id and c.get("auth_user_id") != auth_user_id:
                     c["auth_user_id"] = auth_user_id  # 表示・削除用の控え（判定には使わない）
                     _save(data)
-        return _new_session(email, cred["name"], auth_user_id, needs_migration, cred_id)
+        return _new_session(
+            email, cred["name"], auth_user_id, needs_migration, cred_id,
+            display_name=remote.get("display_name") if remote else None,
+            username=remote.get("username") if remote else None,
+            avatar_url=remote.get("avatar_url") if remote else None,
+        )
 
 
 def _new_session(email: str, credential: str, auth_user_id: str | None, needs_migration: bool = False,
-                 cred_id: str | None = None) -> str:
+                 cred_id: str | None = None, display_name: str | None = None, username: str | None = None,
+                 avatar_url: str | None = None) -> str:
     """セッションを作る（_lock を持った状態で呼ぶ）。"""
     now = time.time()
     for sid in [s for s, v in _sessions.items() if v["expires"] < now]:
@@ -477,14 +483,19 @@ def _new_session(email: str, credential: str, auth_user_id: str | None, needs_mi
     sid = secrets.token_urlsafe(32)
     _sessions[sid] = {"email": email, "credential": credential, "expires": now + SESSION_SECONDS,
                       "auth_user_id": auth_user_id, "cred_id": cred_id, "checked_at": now, "ok_at": now,
-                      "needs_migration": needs_migration}
+                      "needs_migration": needs_migration, "display_name": display_name,
+                      "username": username, "avatar_url": avatar_url}
     return sid
 
 
 def sso_session(email: str, row: dict) -> str:
     """共通認証基盤の SSO で確かめた人のセッションを作る。"""
     with _lock:
-        return _new_session(email, f"SSO ({row.get('username')})", row["user_id"])
+        return _new_session(
+            email, f"SSO ({row.get('username')})", row["user_id"],
+            display_name=row.get("display_name"), username=row.get("username"),
+            avatar_url=row.get("avatar_url"),
+        )
 
 
 def _still_allowed(sid: str, sess: dict) -> bool:
@@ -506,7 +517,8 @@ def _still_allowed(sid: str, sess: dict) -> bool:
             row = authdb.credential(sess["cred_id"])
             ok = bool(row) and row.get("user_id") == user_id and authdb.allowed(row)
         else:
-            ok = authdb.allowed(authdb.user(user_id))
+            row = authdb.user(user_id)
+            ok = authdb.allowed(row)
     except authdb.AuthDbError as ex:
         # 一時的につながらないだけなら、しばらくは前回の結果を使う
         print(f"passkey: {ex}", flush=True)
@@ -517,6 +529,13 @@ def _still_allowed(sid: str, sess: dict) -> bool:
             return False
         if sid in _sessions:
             _sessions[sid]["ok_at"] = now
+            if row:
+                if "display_name" in row:
+                    _sessions[sid]["display_name"] = row.get("display_name")
+                if "username" in row:
+                    _sessions[sid]["username"] = row.get("username")
+                if "avatar_url" in row:
+                    _sessions[sid]["avatar_url"] = row.get("avatar_url")
     return True
 
 
@@ -536,7 +555,9 @@ def session(cookie_header: str, email: str) -> dict | None:
         sess = dict(sess)
     if common_enabled() and not _still_allowed(sid, sess):
         return None
-    return sess
+    with _lock:
+        live = _sessions.get(sid)
+        return dict(live) if live else None
 
 
 def logout(cookie_header: str) -> None:

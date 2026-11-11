@@ -425,3 +425,16 @@ pre.log { margin: 0; font: .76rem/1.5 var(--mono); white-space: pre-wrap; word-b
 @media (hover: none) {
   .btn:hover:not(:disabled) { transform: none; filter: none; }
 }
+
+.account-card { display: flex; flex-direction: column; gap: 14px; padding: 14px 16px; margin-bottom: 16px; border-radius: 12px; background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.1); }
+.account-profile { display: flex; align-items: center; gap: 14px; }
+.account-avatar { width: 48px; height: 48px; border-radius: 50%; overflow: hidden; flex-shrink: 0; background: rgba(127,127,127,0.15); display: flex; align-items: center; justify-content: center; border: 1px solid rgba(255,255,255,0.15); }
+.account-avatar-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.account-avatar-fallback { display: flex; align-items: center; justify-content: center; width: 100%; height: 100%; color: var(--text-2); }
+.account-avatar-fallback svg { width: 24px; height: 24px; }
+.account-details { min-width: 0; flex: 1; }
+.account-name { font-weight: 600; font-size: 1rem; color: var(--text); display: flex; align-items: center; gap: 6px; }
+.account-email { font-size: .8rem; color: var(--text-2); margin-top: 2px; }
+.account-actions { display: flex; align-items: center; gap: 8px; }
+.account-actions a.btn { text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+.who-avatar { width: 18px; height: 18px; border-radius: 50%; object-fit: cover; display: inline-block; vertical-align: middle; }
