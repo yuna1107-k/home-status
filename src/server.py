@@ -280,6 +280,46 @@ class AppHandler(BaseHandler):
         email = who
         sess = self._session(email)
 
+        if path == "/auth/sso/login":
+            redirect_uri = urllib.parse.quote("https://status.yuna1107.com/auth/sso/callback", safe="")
+            self._redirect(f"https://auth.yuna1107.com/oauth/authorize?client_id=status&redirect_uri={redirect_uri}&response_type=code")
+            return
+        if path == "/auth/sso/callback":
+            q = self._query()
+            code = q.get("code")
+            if not code:
+                self._redirect("/login?error=missing_code")
+                return
+            code_hash = hashlib.sha256(code.encode()).hexdigest()
+            now_ms = int(time.time() * 1000)
+            try:
+                rows = cloud.query_auth_db(
+                    """SELECT c.user_id, u.username, u.display_name, u.status as user_status, p.is_enabled
+                       FROM oauth_codes c
+                       JOIN users u ON c.user_id = u.id
+                       LEFT JOIN user_services p ON u.id = p.user_id AND p.service_id = 'status'
+                       WHERE c.code_hash = ? AND c.client_id = 'status' AND c.expires_at > ?""",
+                    [code_hash, now_ms],
+                )
+                if rows:
+                    r = rows[0]
+                    if r.get("user_status") == "active" and (r.get("username") == "yuna" or r.get("is_enabled") == 1):
+                        cloud.query_auth_db("DELETE FROM oauth_codes WHERE code_hash = ?", [code_hash])
+                        sid = secrets.token_urlsafe(32)
+                        with passkey._lock:
+                            passkey._sessions[sid] = {
+                                "email": email or r.get("username"),
+                                "credential": f"SSO ({r.get('username')})",
+                                "expires": time.time() + passkey.SESSION_SECONDS,
+                            }
+                        self._audit("sso.login", email, {"credential": "SSO"}, message=f"SSOでログインしました ({r.get('username')})")
+                        self._send(302, b"", "text/plain", {"Location": "/", "Set-Cookie": passkey.cookie_for(sid)})
+                        return
+            except Exception as ex:
+                print(f"[sso] callback error: {ex}", flush=True)
+            self._redirect("/login?error=sso_unauthorized")
+            return
+
         if path == "/login":
             if sess:
                 self._redirect("/")
@@ -358,10 +398,11 @@ class AppHandler(BaseHandler):
         try:
             # ---- パスキー（ログイン前でも使うもの）
             if path == "/api/passkey/login/options":
-                if not passkey.has_credentials():
+                common = data.get("common", True) if isinstance(data, dict) else True
+                if not common and not passkey.has_credentials():
                     self._json(409, {"error": "パスキーがまだ登録されていません"})
                     return
-                self._json(200, passkey.login_options(email))
+                self._json(200, passkey.login_options(email, common=common))
                 return
             if path == "/api/passkey/login":
                 try:

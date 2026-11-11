@@ -116,13 +116,16 @@ def configured() -> bool:
     return _config() is not None
 
 
-def _request(body: dict, timeout: float = 20) -> list[dict]:
+AUTH_DB_ID = "eb502fa2-ed0f-4a62-8ab9-942ec5de6081"
+
+def _request(body: dict, timeout: float = 20, database: str | None = None) -> list[dict]:
     cfg = _config()
     if cfg is None:
         raise CloudError("D1 が未設定です（.env の CF_ACCOUNT_ID / D1_DATABASE_ID とトークン）")
-    account, database, token = cfg
+    account, default_database, token = cfg
+    target_database = database or default_database
     req = urllib.request.Request(
-        f"{API}/accounts/{account}/d1/database/{database}/query",
+        f"{API}/accounts/{account}/d1/database/{target_database}/query",
         data=json.dumps(body).encode(),
         headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         method="POST",
@@ -149,6 +152,12 @@ def _request(body: dict, timeout: float = 20) -> list[dict]:
 def query(sql: str, params: list | tuple = (), timeout: float = 15) -> list[dict]:
     """1 文を実行して行の一覧を返す（読み取り用。失敗すると CloudError）。"""
     result = _request({"sql": sql, "params": list(params)}, timeout=timeout)
+    return (result[0].get("results") if result else []) or []
+
+
+def query_auth_db(sql: str, params: list | tuple = (), timeout: float = 15) -> list[dict]:
+    """auth-db (統合認証DB) に対してクエリを実行して行の一覧を返す。"""
+    result = _request({"sql": sql, "params": list(params)}, timeout=timeout, database=AUTH_DB_ID)
     return (result[0].get("results") if result else []) or []
 
 

@@ -182,7 +182,9 @@ def _parse_auth_data(auth: bytes) -> dict:
     if len(auth) < 37:
         raise PasskeyError("認証データが短すぎます")
     rp_hash, flags, count = auth[:32], auth[32], struct.unpack(">I", auth[33:37])[0]
-    if rp_hash != hashlib.sha256(RP_ID.encode()).digest():
+    allowed_rp_ids = {RP_ID, "yuna1107.com"}
+    allowed_hashes = {hashlib.sha256(r.encode()).digest() for r in allowed_rp_ids}
+    if rp_hash not in allowed_hashes:
         raise PasskeyError("別のサイト向けの認証データです")
     if not flags & 0x01:
         raise PasskeyError("ユーザーの操作が確認できません")
@@ -258,13 +260,14 @@ def register(email: str, body: dict) -> dict:
 
 # ---------------------------------------------------------------- ログイン
 
-def login_options(email: str) -> dict:
+def login_options(email: str, common: bool = True) -> dict:
     with _lock:
         creds = _load()["credentials"]
+    target_rp_id = "yuna1107.com" if common else RP_ID
     return {
         "challenge": _new_challenge("login", email),
-        "rpId": RP_ID,
-        "allowCredentials": [{"type": "public-key", "id": c["id"]} for c in creds],
+        "rpId": target_rp_id,
+        "allowCredentials": [] if common else [{"type": "public-key", "id": c["id"]} for c in creds],
         "userVerification": "required",
         "timeout": CHALLENGE_SECONDS * 1000,
     }
@@ -285,6 +288,62 @@ def login(email: str, body: dict) -> str:
     with _lock:
         data = _load()
         cred = next((c for c in data["credentials"] if c["id"] == cred_id), None)
+        if cred is None:
+            # ローカルに見つからない場合、auth-db（共通認証DB）を照会
+            try:
+                rows = cloud.query_auth_db(
+                    """SELECT c.id, c.user_id, c.public_key, c.counter, c.name,
+                              u.username, u.display_name, u.status as user_status,
+                              p.is_enabled
+                       FROM credentials c
+                       JOIN users u ON c.user_id = u.id
+                       LEFT JOIN user_services p ON u.id = p.user_id AND p.service_id = 'status'
+                       WHERE c.id = ?""",
+                    [cred_id],
+                )
+                if rows:
+                    r = rows[0]
+                    if r.get("user_status") == "active" and (r.get("username") == "yuna" or r.get("is_enabled") == 1):
+                        pub_raw = r["public_key"]
+                        if isinstance(pub_raw, (bytes, bytearray)):
+                            pub_bytes = bytes(pub_raw)
+                        elif isinstance(pub_raw, list):
+                            pub_bytes = bytes(pub_raw)
+                        elif isinstance(pub_raw, str):
+                            try:
+                                pub_bytes = bytes.fromhex(pub_raw)
+                            except ValueError:
+                                pub_bytes = unb64url(pub_raw)
+                        else:
+                            pub_bytes = b""
+
+                        try:
+                            imported_key = serialization.load_der_public_key(pub_bytes)
+                            pem = imported_key.public_bytes(
+                                serialization.Encoding.PEM,
+                                serialization.PublicFormat.SubjectPublicKeyInfo,
+                            ).decode()
+                            if isinstance(imported_key, ec.EllipticCurvePublicKey):
+                                alg = -7
+                            elif isinstance(imported_key, rsa.RSAPublicKey):
+                                alg = -257
+                            elif isinstance(imported_key, ed25519.Ed25519PublicKey):
+                                alg = -8
+                            else:
+                                alg = -7
+
+                            cred = {
+                                "id": cred_id, "public_key": pem, "alg": alg, "sign_count": auth["count"],
+                                "name": r.get("name") or "共通パスキー (yuna1107.com)", "email": email,
+                                "created_at": time.strftime("%Y-%m-%d %H:%M"), "last_used_at": None,
+                            }
+                            data["credentials"].append(cred)
+                            _save(data)
+                        except Exception as ex:
+                            print(f"[passkey] Error loading auth-db key: {ex}", flush=True)
+            except Exception as ex:
+                print(f"[passkey] Error querying auth-db: {ex}", flush=True)
+
         if cred is None:
             raise PasskeyError("登録されていないパスキーです")
         _verify_signature(cred["public_key"], cred["alg"], signature,
