@@ -58,8 +58,9 @@ _USER_JOIN = "LEFT JOIN user_services us ON us.user_id = u.id AND us.service_id 
 
 
 def allowed(row: dict | None) -> bool:
-    """有効なユーザーで、管理者か、このサイトの利用が許可されていれば True。
+    """有効なユーザーで、このサイトの利用が許可されて（user_services.is_enabled = 1）いれば True。
 
+    管理者（global_role='admin'）でも、このサイトの利用が許可されていなければ使えない。
     AUTH_OWNER_USER_ID があれば、そのユーザーであることも求める。
     """
     if not row:
@@ -68,7 +69,7 @@ def allowed(row: dict | None) -> bool:
         return False
     if row.get("user_status") != "active":
         return False
-    return row.get("global_role") == "admin" or row.get("is_enabled") == 1
+    return row.get("is_enabled") == 1
 
 
 def credential(cred_id: str) -> dict | None:

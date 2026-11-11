@@ -162,7 +162,7 @@ class FakeAuthDb:
 
     def __init__(self):
         self.users = {USER_ID: {"user_id": USER_ID, "username": "owner", "display_name": "Owner",
-                                "user_status": "active", "global_role": "admin", "is_enabled": None}}
+                                "user_status": "active", "global_role": "admin", "is_enabled": 1}}
         self.creds = {}  # id -> {rp_id, user_id, public_key, name}
         self.added = []
         self.audits = []
@@ -285,14 +285,27 @@ class CommonAuthTest(unittest.TestCase):
         user.update(user_status="suspended")
         with self.assertRaises(passkey.PasskeyError):
             self.login(a)
-        user.update(user_status="active", global_role="admin", is_enabled=None)
+        user.update(user_status="active", is_enabled=1)
         self.login(a)
+        # 管理者でも、このサイトの利用が許可されていなければ使えない
+        user.update(global_role="admin", is_enabled=0)
+        with self.assertRaises(passkey.PasskeyError):
+            self.login(a)
+        user.update(is_enabled=None)  # user_services の行が無い
+        with self.assertRaises(passkey.PasskeyError):
+            self.login(a)
 
     def test_auth_db_down_at_login(self):
         a = self.common_auth()
         self.db.down = True
         with self.assertRaises(passkey.PasskeyError):
             self.login(a)
+
+    def test_admin_revocation_ends_session(self):
+        sid = self.login(self.common_auth())
+        self.db.users[USER_ID].update(is_enabled=0)  # 管理者のまま、このサイトだけ無効
+        passkey._sessions[sid]["checked_at"] -= passkey.AUTH_RECHECK_SECONDS + 1
+        self.assertIsNone(self.sess(sid))
 
     def test_revocation_ends_session(self):
         sid = self.login(self.common_auth())
@@ -508,7 +521,9 @@ class AuthDbSqlTest(unittest.TestCase):
 
     def test_allowed(self):
         self.assertFalse(authdb.allowed(None))
-        self.assertTrue(authdb.allowed({"user_status": "active", "global_role": "admin", "is_enabled": 0}))
+        self.assertFalse(authdb.allowed({"user_status": "active", "global_role": "admin", "is_enabled": 0}))
+        self.assertFalse(authdb.allowed({"user_status": "active", "global_role": "admin", "is_enabled": None}))
+        self.assertTrue(authdb.allowed({"user_status": "active", "global_role": "admin", "is_enabled": 1}))
         self.assertTrue(authdb.allowed({"user_status": "active", "global_role": "member", "is_enabled": 1}))
         self.assertFalse(authdb.allowed({"user_status": "active", "global_role": "member", "is_enabled": None}))
         self.assertFalse(authdb.allowed({"user_status": "suspended", "global_role": "admin", "is_enabled": 1}))
